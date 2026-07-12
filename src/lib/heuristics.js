@@ -79,32 +79,40 @@ export function detectStack(tree) {
   return { runtime: 'unknown', label: 'unknown' };
 }
 
-/**
- * Fully local fallback used when Ollama is disabled or unreachable. Decides
- * whether the repo can run in-browser and, if so, in which directory and with
- * which commands — instead of guessing `npm install` and failing halfway.
- *
- * For non-Node repos, returns canRunInBrowserSandbox: false with helpful info.
- * The frontend uses the Docker backend for these.
- */
 export function analyzeTreeLocally(tree) {
-  const workdir = findPackageJsonDir(tree);
-
-  if (workdir === null) {
-    const { runtime, label } = detectStack(tree);
+  // First, check if the repo requires a non-Node backend (Python, Docker, Go, Rust, etc.)
+  // Even if it has a package.json, if it ALSO has a requirements.txt or Dockerfile,
+  // WebContainers won't be able to run the backend half. So we must use Docker.
+  const stack = detectStack(tree);
+  
+  if (stack.runtime !== 'unknown') {
     return {
       ok: true,
       source: 'heuristic',
-      runtime,
+      runtime: stack.runtime,
       canRunInBrowserSandbox: false,
       workdir: null,
       installCmd: null,
       startCmd: null,
       envVarsMentioned: [],
-      reasoning:
-        runtime === 'unknown'
-          ? 'No recognized project manifest found. Try running with the Docker backend for custom setups.'
-          : `This is a ${label} project. It will be run via the Docker backend sandbox.`,
+      reasoning: `Detected ${stack.label} dependencies. WebContainers can only run pure Node.js, so this will be routed to the Docker backend.`,
+    };
+  }
+
+  // If no other backend is detected, see if it's a pure Node.js project
+  const workdir = findPackageJsonDir(tree);
+
+  if (workdir === null) {
+    return {
+      ok: true,
+      source: 'heuristic',
+      runtime: 'unknown',
+      canRunInBrowserSandbox: false,
+      workdir: null,
+      installCmd: null,
+      startCmd: null,
+      envVarsMentioned: [],
+      reasoning: 'No recognized project manifest found. Try running with the Docker backend for custom setups.',
     };
   }
 
