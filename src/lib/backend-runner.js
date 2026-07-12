@@ -42,6 +42,24 @@ export async function runRepoBackend({ sessionId, envVars }) {
 }
 
 /**
+ * Run a previously analyzed repo natively (without Docker).
+ */
+export async function runRepoNative({ sessionId, envVars }) {
+  const res = await fetch(`${BACKEND_URL}/api/run-native`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sessionId, envVars }),
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.error || `Backend error: ${res.status}`);
+  }
+
+  return res.json();
+}
+
+/**
  * Stop a running sandbox.
  */
 export async function stopRepoBackend(sessionId) {
@@ -108,15 +126,45 @@ export function getPreviewUrl(sessionId) {
 }
 
 /**
- * Check if the backend server is reachable.
+ * Check if the backend server is reachable and Docker is available.
+ * Returns { serverOnline, dockerOnline } status object.
+ * Retries up to `maxRetries` times if the server is unreachable (handles
+ * the race condition where Vite auto-starts the backend but it's not ready yet).
+ */
+export async function checkBackendStatus({ maxRetries = 1, retryDelayMs = 1500 } = {}) {
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      const res = await fetch(`${BACKEND_URL}/api/status/health-check`, {
+        signal: AbortSignal.timeout(2000),
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        return {
+          serverOnline: true,
+          dockerOnline: data.docker === 'online',
+          nativeRuntimes: data.nativeRuntimes || {},
+        };
+      }
+
+      // Server responded but not OK — it's still online
+      return { serverOnline: true, dockerOnline: false, nativeRuntimes: {} };
+    } catch {
+      // Server unreachable — retry if we have attempts left
+      if (attempt < maxRetries) {
+        await new Promise((r) => setTimeout(r, retryDelayMs));
+      }
+    }
+  }
+  return { serverOnline: false, dockerOnline: false, nativeRuntimes: {} };
+}
+
+/**
+ * Legacy compatibility wrapper.
+ * Returns true only if BOTH the backend server AND Docker are online.
  */
 export async function isBackendAvailable() {
-  try {
-    const res = await fetch(`${BACKEND_URL}/api/status/health-check`, {
-      signal: AbortSignal.timeout(2000),
-    });
-    return res.ok || res.status === 404; // 404 means server is up but no session
-  } catch {
-    return false;
-  }
+  const { serverOnline, dockerOnline } = await checkBackendStatus();
+  return serverOnline && dockerOnline;
 }
+

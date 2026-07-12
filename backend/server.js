@@ -14,9 +14,23 @@ import { join } from 'path';
 import { mkdirSync, rmSync, existsSync } from 'fs';
 import { detectRuntime, detectEnvVars } from './detector.js';
 import { startSandbox, stopSandbox, getSession, cleanupAll } from './sandbox.js';
-import Docker from 'dockerode';
-
-const dockerCheck = new Docker();
+import {
+  checkNativeRuntimes,
+  canRunNatively,
+  startNativeProcess,
+  stopNativeProcess,
+  getNativeSession,
+  cleanupAllNative,
+} from './native-runner.js';
+// Docker is optional — the server starts even if Docker Desktop isn't running.
+// We create the instance lazily and never let it crash the startup.
+let dockerCheck = null;
+try {
+  const Docker = (await import('dockerode')).default;
+  dockerCheck = new Docker();
+} catch {
+  console.log('⚠ Docker module unavailable — Docker features will be disabled.');
+}
 
 const app = express();
 const server = createServer(app);
@@ -114,6 +128,7 @@ app.post('/api/analyze', async (req, res) => {
         install: runtime.install,
         start: runtime.start,
       },
+      nativeAvailable: canRunNatively(runtime.id),
     });
   } catch (err) {
     // Clean up on failure
@@ -174,7 +189,70 @@ app.post('/api/run', async (req, res) => {
       });
     }, 3000);
 
-    res.json({ ok: true, previewUrl, port: hostPort });
+    res.json({ ok: true, previewUrl, port: hostPort, mode: 'docker' });
+  } catch (err) {
+    broadcast(sessionId, {
+      type: 'error',
+      message: err.message,
+    });
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * POST /api/run-native
+ * Run a previously analyzed repo natively (without Docker).
+ */
+app.post('/api/run-native', async (req, res) => {
+  const { sessionId, envVars } = req.body;
+  if (!sessionId) return res.status(400).json({ error: 'sessionId is required' });
+
+  const repoDir = join(REPOS_DIR, sessionId);
+  if (!existsSync(repoDir)) {
+    return res.status(404).json({ error: 'Session not found. Analyze the repo first.' });
+  }
+
+  const runtime = detectRuntime(repoDir);
+
+  if (!canRunNatively(runtime.id)) {
+    return res.status(400).json({
+      error: `${runtime.label} is not installed on this machine. Install it or use Docker.`,
+    });
+  }
+
+  broadcast(sessionId, {
+    type: 'stage',
+    stage: 'building',
+    message: `Setting up ${runtime.label} natively...`,
+  });
+
+  try {
+    const { hostPort } = await startNativeProcess({
+      sessionId,
+      repoDir,
+      runtime,
+      envVars: envVars || {},
+      onOutput: (text) => {
+        broadcast(sessionId, { type: 'output', text });
+      },
+    });
+
+    const previewUrl = `http://localhost:${hostPort}`;
+
+    broadcast(sessionId, {
+      type: 'stage',
+      stage: 'ready',
+      message: 'App is running!',
+      previewUrl,
+    });
+
+    broadcast(sessionId, {
+      type: 'server-ready',
+      url: previewUrl,
+      port: hostPort,
+    });
+
+    res.json({ ok: true, previewUrl, port: hostPort, mode: 'native' });
   } catch (err) {
     broadcast(sessionId, {
       type: 'error',
@@ -191,9 +269,17 @@ app.post('/api/run', async (req, res) => {
 app.post('/api/stop/:sessionId', async (req, res) => {
   const { sessionId } = req.params;
 
-  await stopSandbox(sessionId, (msg) => {
-    broadcast(sessionId, { type: 'output', text: msg });
-  });
+  // Check if it's a native session first
+  const nativeSession = getNativeSession(sessionId);
+  if (nativeSession) {
+    await stopNativeProcess(sessionId, (msg) => {
+      broadcast(sessionId, { type: 'output', text: msg });
+    });
+  } else {
+    await stopSandbox(sessionId, (msg) => {
+      broadcast(sessionId, { type: 'output', text: msg });
+    });
+  }
 
   // Clean up repo files
   const repoDir = join(REPOS_DIR, sessionId);
@@ -209,12 +295,24 @@ app.post('/api/stop/:sessionId', async (req, res) => {
  * Check if the backend server AND Docker are running.
  */
 app.get('/api/status/health-check', async (req, res) => {
-  try {
-    await dockerCheck.ping();
-    res.json({ status: 'ok', docker: 'online' });
-  } catch (err) {
-    res.status(503).json({ status: 'error', docker: 'offline', error: err.message });
+  const nativeRuntimes = checkNativeRuntimes();
+  let dockerStatus = 'unavailable';
+
+  if (dockerCheck) {
+    try {
+      await dockerCheck.ping();
+      dockerStatus = 'online';
+    } catch {
+      dockerStatus = 'offline';
+    }
   }
+
+  res.json({
+    status: 'ok',
+    server: 'online',
+    docker: dockerStatus,
+    nativeRuntimes,
+  });
 });
 
 /**
@@ -222,7 +320,11 @@ app.get('/api/status/health-check', async (req, res) => {
  * Check if a session is running.
  */
 app.get('/api/status/:sessionId', (req, res) => {
-  const session = getSession(req.params.sessionId);
+  // Check both native and Docker sessions
+  const nativeSession = getNativeSession(req.params.sessionId);
+  const dockerSession = getSession(req.params.sessionId);
+  const session = nativeSession || dockerSession;
+
   if (!session) {
     return res.json({ running: false });
   }
@@ -230,6 +332,7 @@ app.get('/api/status/:sessionId', (req, res) => {
     running: true,
     port: session.hostPort,
     runtime: session.runtime.label,
+    mode: nativeSession ? 'native' : 'docker',
     previewUrl: `http://localhost:${session.hostPort}`,
   });
 });
@@ -275,13 +378,15 @@ proxy.on('error', (err, req, res) => {
 
 // Graceful shutdown
 process.on('SIGINT', async () => {
-  console.log('\nShutting down — cleaning up containers...');
+  console.log('\nShutting down — cleaning up...');
   await cleanupAll();
+  await cleanupAllNative();
   process.exit(0);
 });
 
 process.on('SIGTERM', async () => {
   await cleanupAll();
+  await cleanupAllNative();
   process.exit(0);
 });
 

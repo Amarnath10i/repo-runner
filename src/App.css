@@ -833,3 +833,115 @@ input::placeholder {
 @keyframes spin {
   to { transform: rotate(360deg); }
 }
+
+/* ─── Backend Badge Warning State ─── */
+.backend-badge.warning {
+  color: var(--status-warning);
+  border-color: rgba(251, 191, 36, 0.3);
+  background: rgba(251, 191, 36, 0.08);
+}
+
+.backend-badge.warning .badge-dot {
+  animation: dot-pulse 2s ease-in-out infinite;
+}
+
+/* ─── Docker Offline Banner ─── */
+.docker-banner {
+  display: flex;
+  gap: 0.85rem;
+  padding: 1rem;
+  background: rgba(36, 150, 237, 0.06);
+  border: 1px solid rgba(36, 150, 237, 0.2);
+  border-radius: var(--radius-md);
+  animation: slide-in 0.3s ease-out;
+}
+
+.docker-banner-icon {
+  font-size: 2rem;
+  flex-shrink: 0;
+  animation: float 4s ease-in-out infinite;
+}
+
+.docker-banner-content {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.docker-banner-content h4 {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: #60a5fa;
+  margin: 0;
+}
+
+.docker-banner-content p {
+  font-size: 0.78rem;
+  line-height: 1.5;
+  color: var(--text-secondary);
+  margin: 0;
+}
+
+.docker-banner-content strong {
+  color: var(--text-primary);
+  text-transform: capitalize;
+}
+
+.docker-banner-options {
+  margin: 0.25rem 0 0.1rem 1.2rem;
+  padding: 0;
+  font-size: 0.78rem;
+  color: var(--text-secondary);
+  line-height: 1.6;
+}
+
+.docker-banner-options li {
+  margin-bottom: 0.15rem;
+}
+
+.docker-banner-options strong {
+  text-transform: capitalize;
+}
+
+.btn-check-again {
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.4rem 0.85rem;
+  margin-top: 0.25rem;
+  border: 1px solid rgba(36, 150, 237, 0.3);
+  border-radius: var(--radius-sm);
+  background: rgba(36, 150, 237, 0.1);
+  color: #60a5fa;
+  font-family: var(--font-sans);
+  font-size: 0.78rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: var(--transition-fast);
+}
+
+.btn-check-again:hover {
+  background: rgba(36, 150, 237, 0.2);
+  box-shadow: 0 0 16px rgba(36, 150, 237, 0.15);
+  transform: translateY(-1px);
+}
+
+.btn-check-again:active {
+  transform: translateY(0);
+}
+
+.refresh-icon {
+  display: inline-block;
+  font-size: 1rem;
+  transition: transform 0.3s ease;
+}
+
+.btn-check-again:hover .refresh-icon {
+  animation: spin-once 0.5s ease-out;
+}
+
+@keyframes spin-once {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}

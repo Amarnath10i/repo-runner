@@ -9,10 +9,11 @@ import { analyzeTreeLocally } from './lib/heuristics.js';
 import {
   analyzeRepoBackend,
   runRepoBackend,
+  runRepoNative,
   stopRepoBackend,
   connectWebSocket,
   getPreviewUrl,
-  isBackendAvailable,
+  checkBackendStatus,
 } from './lib/backend-runner.js';
 
 const STAGES = {
@@ -75,8 +76,10 @@ export default function App() {
   const [envValues, setEnvValues] = useState({});
   const [previewUrl, setPreviewUrl] = useState('');
   const [runtimeInfo, setRuntimeInfo] = useState(null);
-  const [backendOnline, setBackendOnline] = useState(false);
-  const [executionMode, setExecutionMode] = useState(null); // 'webcontainer' | 'docker'
+  const [serverOnline, setServerOnline] = useState(false);
+  const [dockerOnline, setDockerOnline] = useState(false);
+  const [nativeRuntimes, setNativeRuntimes] = useState({});
+  const [executionMode, setExecutionMode] = useState(null); // 'webcontainer' | 'docker' | 'native'
 
   const treeRef = useRef(null);
   const analysisRef = useRef(null);
@@ -86,14 +89,21 @@ export default function App() {
   const sessionRef = useRef(null);
   const wsRef = useRef(null);
 
-  // Check backend availability on mount
-  useEffect(() => {
-    isBackendAvailable().then(setBackendOnline);
-    const interval = setInterval(() => {
-      isBackendAvailable().then(setBackendOnline);
-    }, 15000);
-    return () => clearInterval(interval);
+  // Check backend availability on mount (with retries for auto-start race condition)
+  const refreshBackendStatus = useCallback(async (retries = 1) => {
+    const status = await checkBackendStatus({ maxRetries: retries, retryDelayMs: 2000 });
+    setServerOnline(status.serverOnline);
+    setDockerOnline(status.dockerOnline);
+    setNativeRuntimes(status.nativeRuntimes || {});
+    return status;
   }, []);
+
+  useEffect(() => {
+    // On first load, retry a few times because the Vite plugin may still be starting the backend
+    refreshBackendStatus(3);
+    const interval = setInterval(() => refreshBackendStatus(0), 10000);
+    return () => clearInterval(interval);
+  }, [refreshBackendStatus]);
 
   // Terminal setup
   useEffect(() => {
@@ -220,25 +230,54 @@ export default function App() {
           color: '#68a063',
         });
         writeLog(`\n\x1b[1;32m✓ This is a Node.js project — running in-browser via WebContainers\x1b[0m\n`);
-      } else if (backendOnline) {
-        // Non-Node project, backend available — use Docker
-        setExecutionMode('docker');
-        writeLog(`\n\x1b[1;33m▸ Non-Node.js project — cloning on backend for Docker sandbox...\x1b[0m\n`);
+      } else {
+        // Non-Node project — needs backend server
+        const currentStatus = await refreshBackendStatus(0);
 
-        // Analyze on backend (re-clones and detects with full filesystem access)
+        if (!currentStatus.serverOnline) {
+          setErrorMsg(
+            `This is a ${analysis.runtime === 'unknown' ? '' : analysis.runtime + ' '}project. ` +
+            'The backend server is not running. It should auto-start with the dev server. ' +
+            'Try restarting with: npm run dev'
+          );
+          setStage(STAGES.ERROR);
+          writeLog(`\n\x1b[1;31m✗ Backend server is not available.\x1b[0m\n`);
+          return;
+        }
+
+        // Analyze on backend (clone + detect)
+        writeLog(`\n\x1b[1;33m▸ Cloning repository on backend...\x1b[0m\n`);
         const backendAnalysis = await analyzeRepoBackend({ repoUrl, token });
         sessionRef.current = backendAnalysis.sessionId;
         setRuntimeInfo(backendAnalysis.runtime);
-
         writeLog(`\x1b[1;32m✓ Detected: ${backendAnalysis.runtime.icon} ${backendAnalysis.runtime.label}\x1b[0m\n`);
 
-        // Check for env vars from both frontend and backend detection
+        // Check for env vars
         const frontendKeys = detectEnvVars(tree);
         const allKeys = Array.from(new Set([
           ...frontendKeys,
           ...(backendAnalysis.envVars || []),
           ...(analysis.envVarsMentioned || []),
         ]));
+
+        // Decide: native or Docker?
+        const canNative = backendAnalysis.nativeAvailable;
+        const canDocker = currentStatus.dockerOnline;
+
+        if (canNative) {
+          // Prefer native — no Docker needed!
+          setExecutionMode('native');
+          writeLog(`\n\x1b[1;32m✓ ${backendAnalysis.runtime.label} is installed locally — running natively (no Docker needed)\x1b[0m\n`);
+        } else if (canDocker) {
+          setExecutionMode('docker');
+          writeLog(`\n\x1b[1;33m▸ Running via Docker sandbox...\x1b[0m\n`);
+        } else {
+          // Neither native nor Docker available
+          setErrorMsg(`docker_offline:${analysis.runtime}`);
+          setStage(STAGES.ERROR);
+          writeLog(`\n\x1b[1;33m⚠ ${backendAnalysis.runtime.label} is not installed locally and Docker is offline.\x1b[0m\n`);
+          return;
+        }
 
         if (allKeys.length > 0) {
           setDetectedKeys(allKeys);
@@ -248,20 +287,12 @@ export default function App() {
           return;
         }
 
-        // No env vars needed — run directly
-        await startDockerRun(backendAnalysis.sessionId, {});
-        return;
-      } else {
-        // Non-Node project, no backend
-        setErrorMsg(
-          `This is a ${analysis.runtime === 'unknown' ? '' : analysis.runtime + ' '}project. ` +
-          'The Docker backend server is either offline or Docker Desktop is not running. ' +
-          'Therefore, only Node.js projects (via WebContainers) are currently available. ' +
-          'Please ensure Docker Desktop is running and start the backend with: cd backend && npm start'
-        );
-        setStage(STAGES.ERROR);
-        writeLog(`\n\x1b[1;31m✗ Backend server or Docker is not available for ${analysis.runtime} projects.\x1b[0m\n`);
-        writeLog(`  Ensure Docker Desktop is running and start the backend with: cd backend && npm start\n`);
+        // No env vars — run directly
+        if (canNative) {
+          await startNativeRun(backendAnalysis.sessionId, {});
+        } else {
+          await startDockerRun(backendAnalysis.sessionId, {});
+        }
         return;
       }
 
@@ -309,13 +340,12 @@ export default function App() {
     }
   }
 
-  // ─── Docker execution (everything else) ───
+  // ─── Docker execution ───
 
   async function startDockerRun(sessionId, envVars) {
     setStage(STAGES.BUILDING);
     writeLog(`\n\x1b[1;36m▸ Building Docker sandbox...\x1b[0m\n`);
 
-    // Connect WebSocket for real-time output
     const wsConnection = connectWebSocket({
       sessionId,
       onOutput: writeLog,
@@ -349,10 +379,51 @@ export default function App() {
     }
   }
 
+  // ─── Native execution (no Docker) ───
+
+  async function startNativeRun(sessionId, envVars) {
+    setStage(STAGES.BUILDING);
+    writeLog(`\n\x1b[1;36m▸ Setting up native environment...\x1b[0m\n`);
+
+    const wsConnection = connectWebSocket({
+      sessionId,
+      onOutput: writeLog,
+      onStage: (data) => {
+        if (data.stage === 'ready') {
+          setStage(STAGES.READY);
+        } else if (data.stage === 'building') {
+          setStage(STAGES.BUILDING);
+        }
+        writeLog(`\x1b[1;35m[${data.stage}]\x1b[0m ${data.message}\n`);
+      },
+      onServerReady: (url) => {
+        setPreviewUrl(url);
+        setStage(STAGES.READY);
+        writeLog(`\n\x1b[1;32m✓ App is live! Preview available.\x1b[0m\n`);
+      },
+      onError: (msg) => {
+        setErrorMsg(msg);
+        setStage(STAGES.ERROR);
+        writeLog(`\n\x1b[1;31m✗ ${msg}\x1b[0m\n`);
+      },
+    });
+    wsRef.current = wsConnection;
+
+    try {
+      await runRepoNative({ sessionId, envVars });
+    } catch (err) {
+      setErrorMsg(err.message);
+      setStage(STAGES.ERROR);
+      writeLog(`\n\x1b[1;31m✗ ${err.message}\x1b[0m\n`);
+    }
+  }
+
   // ─── Env vars submit ───
 
   function handleRunWithEnv() {
-    if (executionMode === 'docker' && sessionRef.current) {
+    if (executionMode === 'native' && sessionRef.current) {
+      startNativeRun(sessionRef.current, envValues);
+    } else if (executionMode === 'docker' && sessionRef.current) {
       startDockerRun(sessionRef.current, envValues);
     } else {
       startWebContainerRun(treeRef.current, envValues);
@@ -387,9 +458,9 @@ export default function App() {
         <span className="brand-tag">paste a GitHub URL → instant live demo</span>
 
         <div className="topbar-right">
-          <div className={`backend-badge ${backendOnline ? 'online' : 'offline'}`}>
+          <div className={`backend-badge ${dockerOnline ? 'online' : serverOnline ? 'warning' : 'offline'}`}>
             <span className="badge-dot" />
-            Docker {backendOnline ? 'Online' : 'Offline'}
+            {dockerOnline ? 'Docker Online' : serverOnline ? 'Docker Offline' : 'Server Offline'}
           </div>
         </div>
       </header>
@@ -439,7 +510,7 @@ export default function App() {
               {runtimeInfo.label}
               {executionMode && (
                 <span style={{ opacity: 0.6, fontSize: '0.65rem', marginLeft: '0.25rem' }}>
-                  via {executionMode === 'webcontainer' ? 'WebContainer' : 'Docker'}
+                  via {executionMode === 'webcontainer' ? 'WebContainer' : executionMode === 'native' ? 'Native' : 'Docker'}
                 </span>
               )}
             </div>
@@ -576,8 +647,39 @@ export default function App() {
             </div>
           )}
 
-          {/* Error */}
-          {stage === STAGES.ERROR && <div className="error-box">❌ {errorMsg}</div>}
+          {/* Error — show runtime unavailable banner or generic error */}
+          {stage === STAGES.ERROR && errorMsg.startsWith('docker_offline:') ? (() => {
+            const runtimeName = errorMsg.split(':')[1];
+            return (
+              <div className="docker-banner">
+                <div className="docker-banner-icon">🐳</div>
+                <div className="docker-banner-content">
+                  <h4>{runtimeName} Runtime Not Found</h4>
+                  <p>
+                    This is a <strong>{runtimeName}</strong> project. To run it, either:
+                  </p>
+                  <ul className="docker-banner-options">
+                    <li>Install <strong>{runtimeName}</strong> on your machine (recommended — fastest)</li>
+                    <li>Or start <strong>Docker Desktop</strong> to run in a sandbox</li>
+                  </ul>
+                  <button
+                    className="btn-check-again"
+                    onClick={async () => {
+                      const status = await refreshBackendStatus(0);
+                      if (status.dockerOnline) {
+                        setStage(STAGES.IDLE);
+                        setErrorMsg('');
+                      }
+                    }}
+                  >
+                    <span className="refresh-icon">↻</span> Check Again
+                  </button>
+                </div>
+              </div>
+            );
+          })() : stage === STAGES.ERROR ? (
+            <div className="error-box">❌ {errorMsg}</div>
+          ) : null}
 
           {/* How it works — idle state */}
           {stage === STAGES.IDLE && (
