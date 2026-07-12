@@ -255,12 +255,13 @@ export default function App() {
         // Non-Node project, no backend
         setErrorMsg(
           `This is a ${analysis.runtime === 'unknown' ? '' : analysis.runtime + ' '}project. ` +
-          'The Docker backend server is not running, so only Node.js projects (via WebContainers) ' +
-          'are currently available. Start the backend with: cd backend && npm start'
+          'The Docker backend server is either offline or Docker Desktop is not running. ' +
+          'Therefore, only Node.js projects (via WebContainers) are currently available. ' +
+          'Please ensure Docker Desktop is running and start the backend with: cd backend && npm start'
         );
         setStage(STAGES.ERROR);
-        writeLog(`\n\x1b[1;31m✗ Backend server not available for ${analysis.runtime} projects.\x1b[0m\n`);
-        writeLog(`  Start it with: cd backend && npm start\n`);
+        writeLog(`\n\x1b[1;31m✗ Backend server or Docker is not available for ${analysis.runtime} projects.\x1b[0m\n`);
+        writeLog(`  Ensure Docker Desktop is running and start the backend with: cd backend && npm start\n`);
         return;
       }
 
