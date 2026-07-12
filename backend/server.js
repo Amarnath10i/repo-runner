@@ -14,6 +14,9 @@ import { join } from 'path';
 import { mkdirSync, rmSync, existsSync } from 'fs';
 import { detectRuntime, detectEnvVars } from './detector.js';
 import { startSandbox, stopSandbox, getSession, cleanupAll } from './sandbox.js';
+import Docker from 'dockerode';
+
+const dockerCheck = new Docker();
 
 const app = express();
 const server = createServer(app);
@@ -199,6 +202,19 @@ app.post('/api/stop/:sessionId', async (req, res) => {
   } catch {}
 
   res.json({ ok: true });
+});
+
+/**
+ * GET /api/status/health-check
+ * Check if the backend server AND Docker are running.
+ */
+app.get('/api/status/health-check', async (req, res) => {
+  try {
+    await dockerCheck.ping();
+    res.json({ status: 'ok', docker: 'online' });
+  } catch (err) {
+    res.status(503).json({ status: 'error', docker: 'offline', error: err.message });
+  }
 });
 
 /**
