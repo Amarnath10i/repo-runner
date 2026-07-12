@@ -92,18 +92,15 @@ function autoStartBackend() {
         if (backendProcess && !backendProcess.killed) {
           console.log(`\n  ▸ Stopping backend server...`);
           backendProcess.kill('SIGTERM');
-          // Force kill after 3 seconds if it doesn't stop
-          setTimeout(() => {
-            if (backendProcess && !backendProcess.killed) {
-              backendProcess.kill('SIGKILL');
-            }
-          }, 3000);
+          backendProcess = null;
         }
       };
 
-      server.httpServer?.on('close', cleanup);
-      process.on('SIGINT', cleanup);
-      process.on('SIGTERM', cleanup);
+      // Only clean up when the entire Node process exits, not when Vite's 
+      // internal HTTP server restarts (e.g., due to port conflicts).
+      process.once('exit', cleanup);
+      process.once('SIGINT', cleanup);
+      process.once('SIGTERM', cleanup);
     },
   };
 }
