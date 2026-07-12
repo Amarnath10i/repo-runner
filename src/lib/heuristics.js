@@ -120,6 +120,32 @@ export function analyzeTreeLocally(tree) {
   const startScript = pickStartScript(pkg);
   const manager = detectPackageManager(tree, workdir);
 
+  // Some Node frameworks don't run in a browser WebContainer — most notably
+  // Next.js, whose dev server uses Turbopack/SWC native (WASM) bindings that
+  // fail with "turbo.createProject is not supported by the wasm bindings".
+  // Route those to the backend to run on real Node instead.
+  const incompatible = webContainerIncompatibleReason(pkg);
+
+  const startCmd = startScript
+    ? manager === 'npm'
+      ? `npm run ${startScript}`
+      : `${manager} ${startScript}`
+    : null;
+
+  if (incompatible) {
+    return {
+      ok: true,
+      source: 'heuristic',
+      runtime: 'node',
+      canRunInBrowserSandbox: false,
+      workdir,
+      installCmd: `${manager} install`,
+      startCmd,
+      envVarsMentioned: [],
+      reasoning: `${incompatible} — running on the backend with real Node instead of in-browser.`,
+    };
+  }
+
   return {
     ok: true,
     source: 'heuristic',
@@ -127,16 +153,22 @@ export function analyzeTreeLocally(tree) {
     canRunInBrowserSandbox: true,
     workdir,
     installCmd: `${manager} install`,
-    startCmd: startScript
-      ? manager === 'npm'
-        ? `npm run ${startScript}`
-        : `${manager} ${startScript}`
-      : null,
+    startCmd,
     envVarsMentioned: [],
     reasoning: workdir
       ? `Node.js project detected in "${workdir}/". Running in-browser via WebContainers.`
       : 'Node.js project detected at the repo root. Running in-browser via WebContainers.',
   };
+}
+
+/**
+ * Return a human-readable reason if a Node project can't run in a browser
+ * WebContainer (so it should go to the backend), or null if it's fine.
+ */
+export function webContainerIncompatibleReason(pkg) {
+  const deps = { ...(pkg?.dependencies || {}), ...(pkg?.devDependencies || {}) };
+  if (deps.next) return 'Next.js uses native/WASM bindings that break in-browser';
+  return null;
 }
 
 export function readPackageJsonAt(tree, dir) {
