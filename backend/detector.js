@@ -480,6 +480,78 @@ export function detectEnvVars(repoDir) {
   return [...keys];
 }
 
+// Ways code reads an env var, across JS/TS/Bun/Vite and Python.
+const ENV_REF_PATTERNS = [
+  /process\.env\.([A-Z][A-Z0-9_]+)/g,
+  /process\.env\[\s*['"]([A-Z][A-Z0-9_]+)['"]\s*\]/g,
+  /Bun\.env\.([A-Z][A-Z0-9_]+)/g,
+  /import\.meta\.env\.([A-Z][A-Z0-9_]+)/g,
+  /os\.environ\.get\(\s*['"]([A-Z][A-Z0-9_]+)['"]/g,
+  /os\.getenv\(\s*['"]([A-Z][A-Z0-9_]+)['"]/g,
+  /os\.environ\[\s*['"]([A-Z][A-Z0-9_]+)['"]\s*\]/g,
+];
+
+// System/framework vars the runner sets itself or that need no user input.
+const ENV_IGNORE = new Set([
+  'NODE_ENV', 'PORT', 'HOST', 'HOSTNAME', 'PWD', 'HOME', 'PATH', 'CI', 'TZ',
+  'PYTHONUTF8', 'PYTHONIOENCODING', 'PYTHONPATH', 'VIRTUAL_ENV',
+  'FLASK_RUN_PORT', 'FLASK_RUN_HOST', 'PUBLIC_URL', 'BASE_URL',
+]);
+
+const CODE_EXTS = new Set([
+  '.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs',
+  '.py', '.go', '.rb', '.php', '.vue', '.svelte', '.astro',
+]);
+
+/**
+ * Find env vars a repo actually reads from its source code (process.env.X,
+ * Bun.env.X, import.meta.env.X, os.environ[...], etc.). This surfaces required
+ * config — DB URIs, API keys — even when the repo ships no .env.example, so the
+ * user can supply the values instead of the app crashing on a missing var.
+ */
+export function detectEnvVarsFromCode(repoDir) {
+  const keys = new Set();
+  const queue = [repoDir];
+  let scanned = 0;
+  const MAX_FILES = 600;
+
+  while (queue.length > 0 && scanned < MAX_FILES) {
+    const dir = queue.shift();
+    let items;
+    try {
+      items = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const it of items) {
+      const p = join(dir, it.name);
+      if (it.isDirectory()) {
+        if (!SKIP_DIRS.has(it.name)) queue.push(p);
+        continue;
+      }
+      const dot = it.name.lastIndexOf('.');
+      const ext = dot >= 0 ? it.name.slice(dot) : '';
+      if (!CODE_EXTS.has(ext)) continue;
+      if (++scanned > MAX_FILES) break;
+      let content;
+      try {
+        content = readFileSync(p, 'utf8');
+      } catch {
+        continue;
+      }
+      if (content.length > 500_000) continue;
+      for (const re of ENV_REF_PATTERNS) {
+        re.lastIndex = 0;
+        let m;
+        while ((m = re.exec(content))) {
+          if (!ENV_IGNORE.has(m[1])) keys.add(m[1]);
+        }
+      }
+    }
+  }
+  return [...keys];
+}
+
 /**
  * Get the base Docker image for a runtime.
  */

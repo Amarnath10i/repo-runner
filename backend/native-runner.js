@@ -197,6 +197,80 @@ function waitForPort(port, timeoutMs = 30000) {
   });
 }
 
+/** Is a TCP port accepting connections on localhost right now? */
+function isPortOpen(port) {
+  return new Promise((resolve) => {
+    const socket = createConnection({ port, host: '127.0.0.1' }, () => {
+      socket.destroy();
+      resolve(true);
+    });
+    socket.on('error', () => resolve(false));
+    socket.setTimeout(600, () => {
+      socket.destroy();
+      resolve(false);
+    });
+  });
+}
+
+// Ports commonly hardcoded by dev servers, tried as a last resort. Excludes the
+// runner's own ports (3001 backend, 5173 Vite) to avoid false positives.
+const COMMON_APP_PORTS = [4000, 3000, 5000, 8000, 8080, 8501, 9000, 5000, 3333];
+
+/**
+ * Watch app output for a port it announces (e.g. "http://localhost:4000",
+ * "listening on port 4000"). Returns a live Set that fills as output streams,
+ * plus a scanner to feed each chunk through. Only local URLs count, so a
+ * printed DB/API URL the app *connects to* isn't mistaken for its own port.
+ */
+function createPortObserver() {
+  const ports = new Set();
+  const patterns = [
+    /https?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1?\]):(\d{2,5})/gi,
+    /listening on\s+(?:port\s*)?:?\s*(\d{2,5})/gi,
+    /(?:server|app|running).{0,20}?\bport\s*[:=]?\s*(\d{2,5})/gi,
+  ];
+  const scan = (text) => {
+    for (const re of patterns) {
+      re.lastIndex = 0;
+      let m;
+      while ((m = re.exec(text))) {
+        const p = Number(m[1]);
+        if (p > 0 && p < 65536) ports.add(p);
+      }
+    }
+  };
+  return { ports, scan };
+}
+
+/**
+ * Wait for the app's server to come up. Prefers the port we allocated (apps
+ * that respect $PORT), then any port announced in the app's output, then a
+ * short list of common hardcoded ports. Returns the port that opened.
+ */
+async function waitForServer({ hostPort, observedPorts, timeoutMs = 60000, onOutput }) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    for (const p of [hostPort, ...observedPorts]) {
+      if (await isPortOpen(p)) {
+        if (p !== hostPort) {
+          onOutput?.(`\nℹ App bound port ${p} (it ignores $PORT=${hostPort}) — using that for the preview.\n`);
+        }
+        return p;
+      }
+    }
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  // Last resort: scan common ports the app may have hardcoded.
+  for (const p of COMMON_APP_PORTS) {
+    if (p === hostPort) continue;
+    if (await isPortOpen(p)) {
+      onOutput?.(`\nℹ Detected app on port ${p} — using that for the preview.\n`);
+      return p;
+    }
+  }
+  return null;
+}
+
 /**
  * Spawn a command and stream output.
  * Returns a promise that resolves when the process exits.
@@ -386,30 +460,36 @@ export async function startNativeProcess({ sessionId, repoDir, runtime, envVars,
   // ─── Start the app ───
   onOutput(`\n🚀 Starting app on port ${hostPort}...\n`);
   const { startCmd, startArgs } = buildStartCommand({ runtime, hostPort, processEnv });
-  const appProcess = spawnApp({ startCmd, startArgs, cwd, processEnv, onOutput });
+  const observer = createPortObserver();
+  const appProcess = spawnApp({
+    startCmd, startArgs, cwd, processEnv,
+    onOutput: (t) => { observer.scan(t); onOutput(t); },
+  });
 
   // Set auto-cleanup timer
   const cleanupTimer = setTimeout(() => {
     stopNativeProcess(sessionId, (msg) => console.log(`[auto-cleanup] ${msg}`));
   }, SESSION_TIMEOUT_MS);
 
-  nativeSessions.set(sessionId, {
+  const session = {
     processes: [appProcess],
     hostPort,
+    ports: [hostPort], // allocated port(s) to release on stop
     runtime,
     repoDir,
     cleanupTimer,
     mode: 'native',
-  });
+  };
+  nativeSessions.set(sessionId, session);
 
-  // Try to detect when the server is ready
-  try {
-    await waitForPort(hostPort, 60000);
-    onOutput(`\n✅ App is live on port ${hostPort}!\n`);
-  } catch {
-    onOutput(`\n⚠ Port ${hostPort} not detected — the app may use a different port or may still be starting.\n`);
+  // Detect when (and on which port) the server actually comes up.
+  const readyPort = await waitForServer({ hostPort, observedPorts: observer.ports, timeoutMs: 60000, onOutput });
+  if (readyPort) {
+    session.hostPort = readyPort;
+    onOutput(`\n✅ App is live on port ${readyPort}!\n`);
+    return { hostPort: readyPort };
   }
-
+  onOutput(`\n⚠ No open port detected — the app may have failed to start (check the logs above).\n`);
   return { hostPort };
 }
 
@@ -479,13 +559,17 @@ export async function startCompoundNative({ sessionId, repoDir, services, envVar
   }
   const { startCmd, startArgs } = buildStartCommand({ runtime: frontend.runtime, hostPort: frontPort, processEnv: fEnv });
   onOutput(`\n🚀 Starting frontend...\n`);
-  processes.push(spawnApp({ startCmd, startArgs, cwd: fcwd, processEnv: fEnv, onOutput }));
+  const observer = createPortObserver();
+  processes.push(spawnApp({
+    startCmd, startArgs, cwd: fcwd, processEnv: fEnv,
+    onOutput: (t) => { observer.scan(t); onOutput(t); },
+  }));
 
   const cleanupTimer = setTimeout(() => {
     stopNativeProcess(sessionId, (msg) => console.log(`[auto-cleanup] ${msg}`));
   }, SESSION_TIMEOUT_MS);
 
-  nativeSessions.set(sessionId, {
+  const session = {
     processes,
     hostPort: frontPort,
     ports,
@@ -493,15 +577,16 @@ export async function startCompoundNative({ sessionId, repoDir, services, envVar
     repoDir,
     cleanupTimer,
     mode: 'native-compound',
-  });
+  };
+  nativeSessions.set(sessionId, session);
 
-  try {
-    await waitForPort(frontPort, 120000);
-    onOutput(`\n✅ App is live on port ${frontPort}!\n`);
-  } catch {
-    onOutput(`\n⚠ Port ${frontPort} not detected — the app may still be starting.\n`);
+  const readyPort = await waitForServer({ hostPort: frontPort, observedPorts: observer.ports, timeoutMs: 120000, onOutput });
+  if (readyPort) {
+    session.hostPort = readyPort; // preview port; `ports` keeps the allocated ones for release
+    onOutput(`\n✅ App is live on port ${readyPort}!\n`);
+    return { hostPort: readyPort };
   }
-
+  onOutput(`\n⚠ Port ${frontPort} not detected — the app may still be starting.\n`);
   return { hostPort: frontPort };
 }
 
