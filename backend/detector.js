@@ -149,11 +149,20 @@ const RUNTIME_CONFIGS = [
     label: 'Python',
     icon: '🐍',
     color: '#3776ab',
-    detect: (dir) =>
-      existsSync(join(dir, 'requirements.txt')) ||
-      existsSync(join(dir, 'pyproject.toml')) ||
-      existsSync(join(dir, 'Pipfile')) ||
-      existsSync(join(dir, 'setup.py')),
+    detect: (dir) => {
+      if (
+        existsSync(join(dir, 'requirements.txt')) ||
+        existsSync(join(dir, 'pyproject.toml')) ||
+        existsSync(join(dir, 'Pipfile')) ||
+        existsSync(join(dir, 'environment.yml')) ||
+        existsSync(join(dir, 'setup.py'))
+      ) return true;
+      try {
+        return readdirSync(dir).some(f => f.endsWith('.py'));
+      } catch {
+        return false;
+      }
+    },
     getCommands: (dir) => {
       const installCmd = existsSync(join(dir, 'requirements.txt'))
         ? 'pip install -r requirements.txt'

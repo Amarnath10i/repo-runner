@@ -50,7 +50,7 @@ export function treeHasFile(tree, fileName) {
 }
 
 const RUNTIME_SIGNATURES = [
-  { runtime: 'python', files: ['requirements.txt', 'pyproject.toml', 'Pipfile', 'environment.yml', 'setup.py'], label: 'Python' },
+  { runtime: 'python', files: ['*.py', 'requirements.txt', 'pyproject.toml', 'Pipfile', 'environment.yml', 'setup.py'], label: 'Python' },
   { runtime: 'go', files: ['go.mod'], label: 'Go' },
   { runtime: 'rust', files: ['Cargo.toml'], label: 'Rust' },
   { runtime: 'php', files: ['composer.json'], label: 'PHP' },
