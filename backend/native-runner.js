@@ -6,6 +6,12 @@ import { spawn, execSync } from 'child_process';
 import { join } from 'path';
 import { writeFileSync, existsSync } from 'fs';
 import { createConnection } from 'net';
+import {
+  isPythonProvisioned,
+  getProvisionedPythonPath,
+  getProvisionedPipPath,
+  provisionPython,
+} from './auto-provision.js';
 
 // Track active native sessions
 const nativeSessions = new Map();
@@ -93,11 +99,21 @@ function getPipCmd(pythonCmd) {
  * Check which runtimes are available natively on this host.
  */
 let _cachedRuntimes = null;
+export function clearRuntimeCache() {
+  _cachedRuntimes = null;
+}
+
 export function checkNativeRuntimes() {
   if (_cachedRuntimes) return _cachedRuntimes;
 
-  const python = getPythonCmd();
-  const pip = getPipCmd(python);
+  let python = getPythonCmd();
+  let pip = getPipCmd(python);
+
+  // Fallback to provisioned Python if system Python is not found
+  if (!python && isPythonProvisioned()) {
+    python = getProvisionedPythonPath();
+    pip = getProvisionedPipPath();
+  }
 
   _cachedRuntimes = {
     python: !!python,
@@ -127,12 +143,17 @@ export function checkNativeRuntimes() {
  */
 export function canRunNatively(runtimeId) {
   const runtimes = checkNativeRuntimes();
+  const isWin = process.platform === 'win32';
+  
+  // Python can be auto-provisioned on Windows, so we say it can run natively
+  const canRunPython = runtimes.python || isWin;
+
   const runtimeMap = {
-    'python': runtimes.python,
-    'python-flask': runtimes.python,
-    'python-fastapi': runtimes.python,
-    'python-django': runtimes.python,
-    'python-streamlit': runtimes.python,
+    'python': canRunPython,
+    'python-flask': canRunPython,
+    'python-fastapi': canRunPython,
+    'python-django': canRunPython,
+    'python-streamlit': canRunPython,
     'go': runtimes.go,
     'rust': runtimes.rust,
     'ruby': runtimes.ruby,
@@ -230,6 +251,13 @@ export async function startNativeProcess({ sessionId, repoDir, runtime, envVars,
       case 'python-fastapi':
       case 'python-django':
       case 'python-streamlit': {
+        // Auto-provision Python if it's not installed locally
+        if (!runtimes.python) {
+          await provisionPython(onOutput);
+          clearRuntimeCache(); // Refresh runtime cache so we pick up the new Python
+          Object.assign(runtimes, checkNativeRuntimes());
+        }
+
         const python = runtimes.pythonCmd || 'python';
 
         // Create virtual environment
