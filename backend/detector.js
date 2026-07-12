@@ -151,24 +151,20 @@ const RUNTIME_CONFIGS = [
     color: '#3776ab',
     detect: (dir) => {
       if (
-        existsSync(join(dir, 'requirements.txt')) ||
-        existsSync(join(dir, 'pyproject.toml')) ||
-        existsSync(join(dir, 'Pipfile')) ||
-        existsSync(join(dir, 'environment.yml')) ||
-        existsSync(join(dir, 'setup.py'))
+        findFileRecursive(dir, 'requirements.txt') ||
+        findFileRecursive(dir, 'pyproject.toml') ||
+        findFileRecursive(dir, 'Pipfile') ||
+        findFileRecursive(dir, 'environment.yml') ||
+        findFileRecursive(dir, 'setup.py')
       ) return true;
-      try {
-        return readdirSync(dir).some(f => f.endsWith('.py'));
-      } catch {
-        return false;
-      }
+      return findFileRecursive(dir, '.py', true) !== null;
     },
     getCommands: (dir) => {
-      const installCmd = existsSync(join(dir, 'requirements.txt'))
+      const installCmd = findFileRecursive(dir, 'requirements.txt')
         ? 'pip install -r requirements.txt'
-        : existsSync(join(dir, 'pyproject.toml'))
+        : findFileRecursive(dir, 'pyproject.toml')
           ? 'pip install .'
-          : existsSync(join(dir, 'Pipfile'))
+          : findFileRecursive(dir, 'Pipfile')
             ? 'pip install pipenv && pipenv install'
             : 'pip install .';
       const appFile = findPythonEntry(dir, ['app.py', 'main.py', 'run.py', 'server.py', 'manage.py']);
@@ -376,12 +372,54 @@ function findPythonEntry(dir, candidates) {
   for (const name of candidates) {
     if (existsSync(join(dir, name))) return name;
   }
-  // If none found, look for any .py file
+  // If none found, look for any .py file in the root
   try {
     const files = readdirSync(dir).filter((f) => f.endsWith('.py'));
     if (files.length > 0) return files[0];
   } catch {
     // ignore
   }
+  // Fallback: look recursively for ANY .py file
+  const recursivePy = findFileRecursive(dir, '.py', true);
+  if (recursivePy) return recursivePy;
+  
   return 'main.py';
+}
+
+const SKIP_DIRS = new Set([
+  'node_modules', '.git', 'dist', 'build', '.next',
+  'vendor', '__pycache__', '.venv', 'venv',
+  'target', 'bin', 'obj',
+]);
+
+/**
+ * Searches recursively for a file.
+ * If `endsWith` is true, it treats `fileName` as an extension (e.g. '.py').
+ * Returns the relative path if found, or null.
+ */
+function findFileRecursive(dir, fileName, endsWith = false) {
+  const queue = [{ currentDir: dir, relPath: '' }];
+  while (queue.length > 0) {
+    const { currentDir, relPath } = queue.shift();
+    try {
+      const items = readdirSync(currentDir, { withFileTypes: true });
+      for (const item of items) {
+        if (item.isDirectory()) {
+          if (!SKIP_DIRS.has(item.name)) {
+            queue.push({
+              currentDir: join(currentDir, item.name),
+              relPath: relPath ? `${relPath}/${item.name}` : item.name
+            });
+          }
+        } else {
+          if (endsWith ? item.name.endsWith(fileName) : item.name === fileName) {
+            return relPath ? `${relPath}/${item.name}` : item.name;
+          }
+        }
+      }
+    } catch {
+      // Ignore read errors
+    }
+  }
+  return null;
 }
