@@ -291,8 +291,9 @@ const COMMON_SUBDIRS = [
  * Run every runtime config against a single directory and return the first
  * match (config + resolved commands), or null when nothing matches.
  */
-function matchRuntimeAt(dir) {
+function matchRuntimeAt(dir, { skipDocker = false } = {}) {
   for (const config of RUNTIME_CONFIGS) {
+    if (skipDocker && DOCKER_RUNTIME_IDS.has(config.id)) continue;
     try {
       if (config.detect(dir)) {
         return { config, commands: config.getCommands(dir) };
@@ -324,11 +325,10 @@ function toRuntime(match, workdir) {
  * has a Dockerfile when Docker isn't available.
  */
 function findNativeRuntime(repoDir) {
-  // Root first.
-  const root = matchRuntimeAt(repoDir);
-  if (root && !DOCKER_RUNTIME_IDS.has(root.config.id)) {
-    return toRuntime(root, '');
-  }
+  // Root first. Skip Docker so a repo whose root (or subfolder) also carries a
+  // Dockerfile still surfaces its underlying language runtime.
+  const root = matchRuntimeAt(repoDir, { skipDocker: true });
+  if (root) return toRuntime(root, '');
 
   // Then common subfolders, then any remaining immediate subdirectory.
   const seen = new Set(COMMON_SUBDIRS);
@@ -344,10 +344,8 @@ function findNativeRuntime(repoDir) {
   for (const sub of [...COMMON_SUBDIRS, ...extras]) {
     const subPath = join(repoDir, sub);
     if (!existsSync(subPath)) continue;
-    const match = matchRuntimeAt(subPath);
-    if (match && !DOCKER_RUNTIME_IDS.has(match.config.id)) {
-      return toRuntime(match, sub);
-    }
+    const match = matchRuntimeAt(subPath, { skipDocker: true });
+    if (match) return toRuntime(match, sub);
   }
   return null;
 }
@@ -389,27 +387,97 @@ export function detectRuntime(repoDir) {
   };
 }
 
+// Hints for classifying a service as the user-facing frontend vs. the API/backend.
+const FRONTEND_HINT_DIRS = new Set(['frontend', 'web', 'client', 'ui', 'www']);
+const BACKEND_HINT_DIRS = new Set(['backend', 'server', 'api', 'service']);
+const FRONTEND_DEP_MARKERS = [
+  'next', 'vite', 'react-scripts', 'nuxt', 'vue', '@angular/core',
+  'svelte', '@sveltejs/kit', 'gatsby', 'react-dom',
+];
+
+function classifyRole(dirName, runtime, absDir) {
+  const lower = (dirName || '').toLowerCase();
+  if (FRONTEND_HINT_DIRS.has(lower)) return 'frontend';
+  if (BACKEND_HINT_DIRS.has(lower)) return 'backend';
+  if (runtime.id === 'node') {
+    const pkg = readJsonSafe(join(absDir, 'package.json'));
+    const deps = { ...(pkg?.dependencies || {}), ...(pkg?.devDependencies || {}) };
+    if (FRONTEND_DEP_MARKERS.some((d) => deps[d])) return 'frontend';
+    return 'backend';
+  }
+  // Python / Go / Ruby / etc. are almost always the backend half.
+  return 'backend';
+}
+
 /**
- * Detect env vars from .env.example or .env.sample files.
+ * Detect all natively-runnable services in a repo (root + immediate
+ * subfolders), each tagged as 'frontend' or 'backend'. Used to run monorepos
+ * (e.g. a Next.js frontend + a FastAPI backend) as one wired-up live demo.
+ */
+export function detectServices(repoDir) {
+  let subdirs = [];
+  try {
+    subdirs = readdirSync(repoDir, { withFileTypes: true })
+      .filter((e) => e.isDirectory() && !SKIP_DIRS.has(e.name))
+      .map((e) => e.name);
+  } catch {
+    // ignore
+  }
+
+  const asService = (d) => {
+    const absDir = d ? join(repoDir, d) : repoDir;
+    const match = matchRuntimeAt(absDir, { skipDocker: true });
+    if (!match) return null;
+    const runtime = toRuntime(match, d);
+    return { role: classifyRole(d, runtime, absDir), runtime, workdir: d };
+  };
+
+  const subServices = subdirs.map(asService).filter(Boolean);
+
+  // In a monorepo where subfolders already provide both a frontend and a
+  // backend, trust them and ignore loose root-level files (e.g. a leftover
+  // script) that would otherwise be mistaken for a third service.
+  const subHasFront = subServices.some((s) => s.role === 'frontend');
+  const subHasBack = subServices.some((s) => s.role === 'backend');
+  if (subHasFront && subHasBack) return subServices;
+
+  const rootService = asService('');
+  return rootService ? [rootService, ...subServices] : subServices;
+}
+
+/**
+ * Detect env vars from .env.example / .env.sample files, scanning the repo root
+ * and immediate subfolders (so a monorepo's frontend/backend keys are found).
  */
 export function detectEnvVars(repoDir) {
   const candidates = ['.env.example', '.env.sample', '.env.template'];
-  for (const name of candidates) {
-    const filePath = join(repoDir, name);
-    if (existsSync(filePath)) {
+  const keys = new Set();
+
+  const dirs = [repoDir];
+  try {
+    for (const e of readdirSync(repoDir, { withFileTypes: true })) {
+      if (e.isDirectory() && !SKIP_DIRS.has(e.name)) dirs.push(join(repoDir, e.name));
+    }
+  } catch {
+    // ignore
+  }
+
+  for (const dir of dirs) {
+    for (const name of candidates) {
+      const filePath = join(dir, name);
+      if (!existsSync(filePath)) continue;
       try {
-        const content = readFileSync(filePath, 'utf8');
-        return content
+        readFileSync(filePath, 'utf8')
           .split('\n')
           .map((l) => l.trim())
           .filter((l) => l && !l.startsWith('#') && l.includes('='))
-          .map((l) => l.split('=')[0].trim());
+          .forEach((l) => keys.add(l.split('=')[0].trim()));
       } catch {
-        return [];
+        // ignore unreadable files
       }
     }
   }
-  return [];
+  return [...keys];
 }
 
 /**

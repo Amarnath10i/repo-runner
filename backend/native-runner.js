@@ -219,6 +219,135 @@ function spawnWithOutput(cmd, args, opts, onOutput) {
 }
 
 /**
+ * Install a single service's dependencies in `cwd`.
+ * Shared by the single-app and compound (multi-service) run paths.
+ */
+async function installDeps({ runtime, cwd, processEnv, runtimes, onOutput }) {
+  const isWin = process.platform === 'win32';
+  switch (runtime.id) {
+    case 'python':
+    case 'python-flask':
+    case 'python-fastapi':
+    case 'python-django':
+    case 'python-streamlit': {
+      if (!runtimes.python) {
+        await provisionPython(onOutput);
+        clearRuntimeCache();
+        Object.assign(runtimes, checkNativeRuntimes());
+      }
+      const python = runtimes.pythonCmd || 'python';
+      onOutput(`\n🐍 Setting up Python virtual environment (using: ${python})...\n`);
+      if (!existsSync(join(cwd, '.venv'))) {
+        await spawnWithOutput(python, ['-m', 'venv', '.venv'], { cwd, env: processEnv }, onOutput);
+      }
+      const venvPip = isWin ? join('.venv', 'Scripts', 'pip.exe') : join('.venv', 'bin', 'pip');
+      if (existsSync(join(cwd, 'requirements.txt'))) {
+        await spawnWithOutput(venvPip, ['install', '-r', 'requirements.txt'], { cwd, env: processEnv }, onOutput);
+      } else if (existsSync(join(cwd, 'pyproject.toml'))) {
+        await spawnWithOutput(venvPip, ['install', '.'], { cwd, env: processEnv }, onOutput);
+      }
+      if (runtime.id === 'python-fastapi') {
+        await spawnWithOutput(venvPip, ['install', 'uvicorn'], { cwd, env: processEnv }, onOutput);
+      }
+      if (runtime.id === 'python-streamlit') {
+        await spawnWithOutput(venvPip, ['install', 'streamlit'], { cwd, env: processEnv }, onOutput);
+      }
+      break;
+    }
+    case 'go':
+      await spawnWithOutput('go', ['mod', 'download'], { cwd, env: processEnv }, onOutput);
+      break;
+    case 'rust':
+      await spawnWithOutput('cargo', ['build', '--release'], { cwd, env: processEnv }, onOutput);
+      break;
+    case 'ruby':
+      if (existsSync(join(cwd, 'Gemfile'))) {
+        await spawnWithOutput('bundle', ['install'], { cwd, env: processEnv }, onOutput);
+      }
+      break;
+    case 'node':
+      await spawnWithOutput('npm', ['install'], { cwd, env: processEnv }, onOutput);
+      break;
+    default:
+      if (runtime.install) {
+        const [cmd, ...args] = runtime.install.split(' ');
+        await spawnWithOutput(cmd, args, { cwd, env: processEnv }, onOutput);
+      }
+  }
+}
+
+/**
+ * Build the [command, args] to start a service on `hostPort`.
+ * May set port-related vars on `processEnv` (e.g. Flask, Next.js read PORT).
+ */
+function buildStartCommand({ runtime, hostPort, processEnv }) {
+  const isWin = process.platform === 'win32';
+  const venvPython = isWin ? join('.venv', 'Scripts', 'python.exe') : join('.venv', 'bin', 'python');
+  switch (runtime.id) {
+    case 'python-flask':
+      processEnv.FLASK_RUN_PORT = String(hostPort);
+      processEnv.FLASK_RUN_HOST = '0.0.0.0';
+      return { startCmd: venvPython, startArgs: [runtime.start?.split(' ').pop() || 'app.py'] };
+    case 'python-fastapi': {
+      const venvUvicorn = isWin ? join('.venv', 'Scripts', 'uvicorn.exe') : join('.venv', 'bin', 'uvicorn');
+      const modulePart = runtime.start?.match(/uvicorn\s+(\S+)/)?.[1] || 'main:app';
+      return { startCmd: venvUvicorn, startArgs: [modulePart, '--host', '0.0.0.0', '--port', String(hostPort)] };
+    }
+    case 'python-django':
+      return { startCmd: venvPython, startArgs: ['manage.py', 'runserver', `0.0.0.0:${hostPort}`] };
+    case 'python-streamlit': {
+      const venvStreamlit = isWin ? join('.venv', 'Scripts', 'streamlit.exe') : join('.venv', 'bin', 'streamlit');
+      const appFile = runtime.start?.match(/streamlit\s+run\s+(\S+)/)?.[1] || 'app.py';
+      return { startCmd: venvStreamlit, startArgs: ['run', appFile, '--server.port', String(hostPort), '--server.headless', 'true', '--server.address', '0.0.0.0'] };
+    }
+    case 'python':
+      return { startCmd: venvPython, startArgs: [runtime.start?.split(' ').pop() || 'main.py'] };
+    case 'go':
+      return { startCmd: 'go', startArgs: ['run', '.'] };
+    case 'rust':
+      return { startCmd: 'cargo', startArgs: ['run', '--release'] };
+    default: {
+      if (runtime.start) {
+        const parts = runtime.start.split(' ');
+        return { startCmd: parts[0], startArgs: parts.slice(1) };
+      }
+      throw new Error(`No start command configured for ${runtime.label}`);
+    }
+  }
+}
+
+/** Spawn a service process and stream its output. Returns the child process. */
+function spawnApp({ startCmd, startArgs, cwd, processEnv, onOutput }) {
+  onOutput(`$ ${startCmd} ${startArgs.join(' ')}\n`);
+  const proc = spawn(startCmd, startArgs, {
+    cwd,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: processEnv,
+    shell: true,
+  });
+  proc.stdout.on('data', (data) => onOutput(data.toString()));
+  proc.stderr.on('data', (data) => onOutput(data.toString()));
+  proc.on('error', (err) => onOutput(`\n❌ Process error: ${err.message}\n`));
+  return proc;
+}
+
+/** Write user-provided env vars to a .env file in `cwd` (if any). */
+function writeEnvFile(cwd, envVars, onOutput) {
+  if (envVars && Object.keys(envVars).length > 0) {
+    const content = Object.entries(envVars).map(([k, v]) => `${k}=${v}`).join('\n');
+    writeFileSync(join(cwd, '.env'), content);
+    onOutput(`Wrote .env with ${Object.keys(envVars).length} variable(s)\n`);
+  }
+}
+
+// Common env var names frameworks use to locate their API/backend, so a
+// frontend can reach a locally-started backend without any manual config.
+const API_URL_ENV_KEYS = [
+  'NEXT_PUBLIC_API_URL', 'VITE_API_URL', 'REACT_APP_API_URL',
+  'API_URL', 'API_BASE_URL', 'BACKEND_URL', 'PUBLIC_API_URL',
+];
+
+/**
  * Start a native process for a repo (no Docker needed).
  */
 export async function startNativeProcess({ sessionId, repoDir, runtime, envVars, onOutput }) {
@@ -232,90 +361,23 @@ export async function startNativeProcess({ sessionId, repoDir, runtime, envVars,
   }
 
   // Write .env file if needed
-  if (envVars && Object.keys(envVars).length > 0) {
-    const envContent = Object.entries(envVars)
-      .map(([k, v]) => `${k}=${v}`)
-      .join('\n');
-    writeFileSync(join(cwd, '.env'), envContent);
-    onOutput(`Wrote .env with ${Object.keys(envVars).length} variable(s)\n`);
-  }
+  writeEnvFile(cwd, envVars, onOutput);
 
   // Build environment variables for the process
   const processEnv = {
     ...process.env,
+    // Force UTF-8 so Python apps that print emoji/Unicode don't crash on
+    // Windows' legacy cp1252 console encoding.
+    PYTHONUTF8: '1',
+    PYTHONIOENCODING: 'utf-8',
     ...(envVars || {}),
     PORT: String(hostPort),
   };
 
   // ─── Install dependencies ───
   onOutput(`\n📦 Installing dependencies...\n`);
-
   try {
-    switch (runtime.id) {
-      case 'python':
-      case 'python-flask':
-      case 'python-fastapi':
-      case 'python-django':
-      case 'python-streamlit': {
-        // Auto-provision Python if it's not installed locally
-        if (!runtimes.python) {
-          await provisionPython(onOutput);
-          clearRuntimeCache(); // Refresh runtime cache so we pick up the new Python
-          Object.assign(runtimes, checkNativeRuntimes());
-        }
-
-        const python = runtimes.pythonCmd || 'python';
-
-        // Create virtual environment
-        onOutput(`\n🐍 Setting up Python virtual environment (using: ${python})...\n`);
-        const venvDir = join(cwd, '.venv');
-
-        if (!existsSync(venvDir)) {
-          await spawnWithOutput(python, ['-m', 'venv', '.venv'], { cwd, env: processEnv }, onOutput);
-        }
-
-        // Determine pip/python paths inside venv
-        const isWin = process.platform === 'win32';
-        const venvPip = isWin ? join('.venv', 'Scripts', 'pip.exe') : join('.venv', 'bin', 'pip');
-        const venvPython = isWin ? join('.venv', 'Scripts', 'python.exe') : join('.venv', 'bin', 'python');
-
-        // Install requirements
-        if (existsSync(join(cwd, 'requirements.txt'))) {
-          await spawnWithOutput(venvPip, ['install', '-r', 'requirements.txt'], { cwd, env: processEnv }, onOutput);
-        } else if (existsSync(join(cwd, 'pyproject.toml'))) {
-          await spawnWithOutput(venvPip, ['install', '.'], { cwd, env: processEnv }, onOutput);
-        }
-
-        // Install runtime-specific extras
-        if (runtime.id === 'python-fastapi') {
-          await spawnWithOutput(venvPip, ['install', 'uvicorn'], { cwd, env: processEnv }, onOutput);
-        }
-        if (runtime.id === 'python-streamlit') {
-          await spawnWithOutput(venvPip, ['install', 'streamlit'], { cwd, env: processEnv }, onOutput);
-        }
-
-        break;
-      }
-      case 'go':
-        await spawnWithOutput('go', ['mod', 'download'], { cwd, env: processEnv }, onOutput);
-        break;
-      case 'rust':
-        await spawnWithOutput('cargo', ['build', '--release'], { cwd, env: processEnv }, onOutput);
-        break;
-      case 'ruby':
-        if (existsSync(join(cwd, 'Gemfile'))) {
-          await spawnWithOutput('bundle', ['install'], { cwd, env: processEnv }, onOutput);
-        }
-        break;
-      case 'node':
-        await spawnWithOutput('npm', ['install'], { cwd, env: processEnv }, onOutput);
-        break;
-      default:
-        if (runtime.install) {
-          const [cmd, ...args] = runtime.install.split(' ');
-          await spawnWithOutput(cmd, args, { cwd, env: processEnv }, onOutput);
-        }
-    }
+    await installDeps({ runtime, cwd, processEnv, runtimes, onOutput });
   } catch (err) {
     onOutput(`\n⚠ Install warning: ${err.message}\n`);
     // Continue anyway — some projects work without full install
@@ -323,85 +385,8 @@ export async function startNativeProcess({ sessionId, repoDir, runtime, envVars,
 
   // ─── Start the app ───
   onOutput(`\n🚀 Starting app on port ${hostPort}...\n`);
-
-  let startCmd, startArgs;
-
-  // Determine start command, injecting the allocated port
-  const isWin = process.platform === 'win32';
-  const venvPython = isWin ? join('.venv', 'Scripts', 'python.exe') : join('.venv', 'bin', 'python');
-
-  switch (runtime.id) {
-    case 'python-flask':
-      startCmd = venvPython;
-      startArgs = [runtime.start?.split(' ').pop() || 'app.py'];
-      processEnv.FLASK_RUN_PORT = String(hostPort);
-      processEnv.FLASK_RUN_HOST = '0.0.0.0';
-      break;
-
-    case 'python-fastapi': {
-      const venvUvicorn = isWin ? join('.venv', 'Scripts', 'uvicorn.exe') : join('.venv', 'bin', 'uvicorn');
-      const modulePart = runtime.start?.match(/uvicorn\s+(\S+)/)?.[1] || 'main:app';
-      startCmd = venvUvicorn;
-      startArgs = [modulePart, '--host', '0.0.0.0', '--port', String(hostPort)];
-      break;
-    }
-
-    case 'python-django':
-      startCmd = venvPython;
-      startArgs = ['manage.py', 'runserver', `0.0.0.0:${hostPort}`];
-      break;
-
-    case 'python-streamlit': {
-      const venvStreamlit = isWin ? join('.venv', 'Scripts', 'streamlit.exe') : join('.venv', 'bin', 'streamlit');
-      const appFile = runtime.start?.match(/streamlit\s+run\s+(\S+)/)?.[1] || 'app.py';
-      startCmd = venvStreamlit;
-      startArgs = ['run', appFile, '--server.port', String(hostPort), '--server.headless', 'true', '--server.address', '0.0.0.0'];
-      break;
-    }
-
-    case 'python': {
-      const appFile = runtime.start?.split(' ').pop() || 'main.py';
-      startCmd = venvPython;
-      startArgs = [appFile];
-      break;
-    }
-
-    case 'go':
-      startCmd = 'go';
-      startArgs = ['run', '.'];
-      break;
-
-    case 'rust':
-      startCmd = 'cargo';
-      startArgs = ['run', '--release'];
-      break;
-
-    default: {
-      if (runtime.start) {
-        const parts = runtime.start.split(' ');
-        startCmd = parts[0];
-        startArgs = parts.slice(1);
-      } else {
-        throw new Error(`No start command configured for ${runtime.label}`);
-      }
-    }
-  }
-
-  onOutput(`$ ${startCmd} ${startArgs.join(' ')}\n`);
-
-  const appProcess = spawn(startCmd, startArgs, {
-    cwd,
-    stdio: ['ignore', 'pipe', 'pipe'],
-    env: processEnv,
-    shell: true,
-  });
-
-  appProcess.stdout.on('data', (data) => onOutput(data.toString()));
-  appProcess.stderr.on('data', (data) => onOutput(data.toString()));
-
-  appProcess.on('error', (err) => {
-    onOutput(`\n❌ Process error: ${err.message}\n`);
-  });
+  const { startCmd, startArgs } = buildStartCommand({ runtime, hostPort, processEnv });
+  const appProcess = spawnApp({ startCmd, startArgs, cwd, processEnv, onOutput });
 
   // Set auto-cleanup timer
   const cleanupTimer = setTimeout(() => {
@@ -409,7 +394,7 @@ export async function startNativeProcess({ sessionId, repoDir, runtime, envVars,
   }, SESSION_TIMEOUT_MS);
 
   nativeSessions.set(sessionId, {
-    process: appProcess,
+    processes: [appProcess],
     hostPort,
     runtime,
     repoDir,
@@ -429,6 +414,98 @@ export async function startNativeProcess({ sessionId, repoDir, runtime, envVars,
 }
 
 /**
+ * Run a multi-service repo (e.g. a frontend + a backend in separate folders)
+ * natively: start the backend first, then start the frontend wired to it via
+ * common API-URL env vars. Returns the frontend's port as the preview URL.
+ */
+export async function startCompoundNative({ sessionId, repoDir, services, envVars, onOutput }) {
+  const runtimes = checkNativeRuntimes();
+  const baseEnv = {
+    ...process.env,
+    // Force UTF-8 for Python apps (see startNativeProcess for why).
+    PYTHONUTF8: '1',
+    PYTHONIOENCODING: 'utf-8',
+    ...(envVars || {}),
+  };
+  const processes = [];
+  const ports = [];
+
+  const backend = services.find((s) => s.role === 'backend');
+  const frontend = services.find((s) => s.role === 'frontend') || services.find((s) => s !== backend);
+
+  // ── Backend first ──
+  let apiUrl = '';
+  if (backend) {
+    const backendPort = getAvailablePort();
+    ports.push(backendPort);
+    const cwd = backend.workdir ? join(repoDir, backend.workdir) : repoDir;
+    onOutput(`\n🧩 Backend: ${backend.runtime.icon} ${backend.runtime.label} in ./${backend.workdir || '.'} → port ${backendPort}\n`);
+    const bEnv = { ...baseEnv, PORT: String(backendPort) };
+    writeEnvFile(cwd, envVars, onOutput);
+    onOutput(`\n📦 Installing backend dependencies...\n`);
+    try {
+      await installDeps({ runtime: backend.runtime, cwd, processEnv: bEnv, runtimes, onOutput });
+    } catch (err) {
+      onOutput(`\n⚠ Backend install warning: ${err.message}\n`);
+    }
+    const { startCmd, startArgs } = buildStartCommand({ runtime: backend.runtime, hostPort: backendPort, processEnv: bEnv });
+    onOutput(`\n🚀 Starting backend...\n`);
+    processes.push(spawnApp({ startCmd, startArgs, cwd, processEnv: bEnv, onOutput }));
+    try {
+      await waitForPort(backendPort, 120000);
+      onOutput(`\n✅ Backend live on port ${backendPort}\n`);
+    } catch {
+      onOutput(`\n⚠ Backend port ${backendPort} not detected — continuing to start the frontend anyway.\n`);
+    }
+    apiUrl = `http://127.0.0.1:${backendPort}`;
+  }
+
+  // ── Frontend, wired to the backend ──
+  const frontPort = getAvailablePort();
+  ports.push(frontPort);
+  const fcwd = frontend.workdir ? join(repoDir, frontend.workdir) : repoDir;
+  const fEnv = { ...baseEnv, PORT: String(frontPort) };
+  if (apiUrl) {
+    for (const k of API_URL_ENV_KEYS) fEnv[k] = apiUrl;
+    onOutput(`\n🔗 Wiring frontend → backend at ${apiUrl}\n`);
+  }
+  onOutput(`\n🧩 Frontend: ${frontend.runtime.icon} ${frontend.runtime.label} in ./${frontend.workdir || '.'} → port ${frontPort}\n`);
+  writeEnvFile(fcwd, envVars, onOutput);
+  onOutput(`\n📦 Installing frontend dependencies...\n`);
+  try {
+    await installDeps({ runtime: frontend.runtime, cwd: fcwd, processEnv: fEnv, runtimes, onOutput });
+  } catch (err) {
+    onOutput(`\n⚠ Frontend install warning: ${err.message}\n`);
+  }
+  const { startCmd, startArgs } = buildStartCommand({ runtime: frontend.runtime, hostPort: frontPort, processEnv: fEnv });
+  onOutput(`\n🚀 Starting frontend...\n`);
+  processes.push(spawnApp({ startCmd, startArgs, cwd: fcwd, processEnv: fEnv, onOutput }));
+
+  const cleanupTimer = setTimeout(() => {
+    stopNativeProcess(sessionId, (msg) => console.log(`[auto-cleanup] ${msg}`));
+  }, SESSION_TIMEOUT_MS);
+
+  nativeSessions.set(sessionId, {
+    processes,
+    hostPort: frontPort,
+    ports,
+    runtime: frontend.runtime,
+    repoDir,
+    cleanupTimer,
+    mode: 'native-compound',
+  });
+
+  try {
+    await waitForPort(frontPort, 120000);
+    onOutput(`\n✅ App is live on port ${frontPort}!\n`);
+  } catch {
+    onOutput(`\n⚠ Port ${frontPort} not detected — the app may still be starting.\n`);
+  }
+
+  return { hostPort: frontPort };
+}
+
+/**
  * Stop a native process.
  */
 export async function stopNativeProcess(sessionId, onOutput) {
@@ -440,30 +517,32 @@ export async function stopNativeProcess(sessionId, onOutput) {
 
   clearTimeout(session.cleanupTimer);
 
-  try {
-    onOutput?.('Stopping process...\n');
-
-    if (process.platform === 'win32') {
-      // On Windows, use taskkill to kill the process tree
-      try {
-        execSync(`taskkill /pid ${session.process.pid} /T /F`, { stdio: 'ignore' });
-      } catch {
-        session.process.kill('SIGKILL');
+  // A session may run one or several processes (compound apps).
+  const procs = session.processes || (session.process ? [session.process] : []);
+  for (const proc of procs) {
+    try {
+      if (process.platform === 'win32') {
+        // On Windows, use taskkill to kill the process tree
+        try {
+          execSync(`taskkill /pid ${proc.pid} /T /F`, { stdio: 'ignore' });
+        } catch {
+          proc.kill('SIGKILL');
+        }
+      } else {
+        proc.kill('SIGTERM');
+        setTimeout(() => {
+          try { proc.kill('SIGKILL'); } catch {}
+        }, 3000);
       }
-    } else {
-      // Send SIGTERM, then SIGKILL after 3s
-      session.process.kill('SIGTERM');
-      setTimeout(() => {
-        try { session.process.kill('SIGKILL'); } catch {}
-      }, 3000);
+    } catch {
+      // already stopped
     }
-
-    onOutput?.('Process stopped.\n');
-  } catch {
-    onOutput?.('Process already stopped.\n');
   }
+  onOutput?.('Process(es) stopped.\n');
 
-  releasePort(session.hostPort);
+  for (const port of session.ports || [session.hostPort]) {
+    releasePort(port);
+  }
   nativeSessions.delete(sessionId);
   onOutput?.('Session cleaned up.\n');
 }

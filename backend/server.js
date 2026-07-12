@@ -12,12 +12,13 @@ import simpleGit from 'simple-git';
 import { v4 as uuid } from 'uuid';
 import { join } from 'path';
 import { mkdirSync, rmSync, existsSync } from 'fs';
-import { detectRuntime, detectEnvVars } from './detector.js';
+import { detectRuntime, detectEnvVars, detectServices } from './detector.js';
 import { startSandbox, stopSandbox, getSession, cleanupAll } from './sandbox.js';
 import {
   checkNativeRuntimes,
   canRunNatively,
   startNativeProcess,
+  startCompoundNative,
   stopNativeProcess,
   getNativeSession,
   cleanupAllNative,
@@ -222,13 +223,20 @@ app.post('/api/run-native', async (req, res) => {
 
   let runtime = detectRuntime(repoDir);
 
+  // Monorepo? If there's both a natively-runnable frontend and backend, run
+  // both and wire them together into a single live demo.
+  const services = detectServices(repoDir).filter((s) => canRunNatively(s.runtime.id));
+  const hasFrontend = services.some((s) => s.role === 'frontend');
+  const hasBackend = services.some((s) => s.role === 'backend');
+  const isCompound = services.length >= 2 && hasFrontend && hasBackend;
+
   // If the repo's primary runtime needs Docker (or is unknown) but we detected
   // a natively-runnable app (possibly in a subfolder), run that instead.
-  if (!canRunNatively(runtime.id) && runtime.nativeFallback && canRunNatively(runtime.nativeFallback.id)) {
+  if (!isCompound && !canRunNatively(runtime.id) && runtime.nativeFallback && canRunNatively(runtime.nativeFallback.id)) {
     runtime = runtime.nativeFallback;
   }
 
-  if (!canRunNatively(runtime.id)) {
+  if (!isCompound && !canRunNatively(runtime.id)) {
     return res.status(400).json({
       error: `${runtime.label} is not installed on this machine. Install it or use Docker.`,
     });
@@ -237,19 +245,22 @@ app.post('/api/run-native', async (req, res) => {
   broadcast(sessionId, {
     type: 'stage',
     stage: 'building',
-    message: `Setting up ${runtime.label} natively...`,
+    message: isCompound
+      ? `Setting up ${services.length} services (frontend + backend)...`
+      : `Setting up ${runtime.label} natively...`,
   });
 
   try {
-    const { hostPort } = await startNativeProcess({
-      sessionId,
-      repoDir,
-      runtime,
-      envVars: envVars || {},
-      onOutput: (text) => {
-        broadcast(sessionId, { type: 'output', text });
-      },
-    });
+    const onOutput = (text) => broadcast(sessionId, { type: 'output', text });
+    const { hostPort } = isCompound
+      ? await startCompoundNative({ sessionId, repoDir, services, envVars: envVars || {}, onOutput })
+      : await startNativeProcess({
+          sessionId,
+          repoDir,
+          runtime,
+          envVars: envVars || {},
+          onOutput,
+        });
 
     const previewUrl = `http://localhost:${hostPort}`;
 
