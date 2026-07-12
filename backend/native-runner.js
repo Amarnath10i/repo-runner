@@ -225,12 +225,18 @@ export async function startNativeProcess({ sessionId, repoDir, runtime, envVars,
   const hostPort = getAvailablePort();
   const runtimes = checkNativeRuntimes();
 
+  // The runnable app may live in a subfolder (monorepo) — run everything there.
+  const cwd = runtime.workdir ? join(repoDir, runtime.workdir) : repoDir;
+  if (runtime.workdir) {
+    onOutput(`\n📂 Project detected in ./${runtime.workdir} — running there.\n`);
+  }
+
   // Write .env file if needed
   if (envVars && Object.keys(envVars).length > 0) {
     const envContent = Object.entries(envVars)
       .map(([k, v]) => `${k}=${v}`)
       .join('\n');
-    writeFileSync(join(repoDir, '.env'), envContent);
+    writeFileSync(join(cwd, '.env'), envContent);
     onOutput(`Wrote .env with ${Object.keys(envVars).length} variable(s)\n`);
   }
 
@@ -262,10 +268,10 @@ export async function startNativeProcess({ sessionId, repoDir, runtime, envVars,
 
         // Create virtual environment
         onOutput(`\n🐍 Setting up Python virtual environment (using: ${python})...\n`);
-        const venvDir = join(repoDir, '.venv');
+        const venvDir = join(cwd, '.venv');
 
         if (!existsSync(venvDir)) {
-          await spawnWithOutput(python, ['-m', 'venv', '.venv'], { cwd: repoDir, env: processEnv }, onOutput);
+          await spawnWithOutput(python, ['-m', 'venv', '.venv'], { cwd, env: processEnv }, onOutput);
         }
 
         // Determine pip/python paths inside venv
@@ -274,40 +280,40 @@ export async function startNativeProcess({ sessionId, repoDir, runtime, envVars,
         const venvPython = isWin ? join('.venv', 'Scripts', 'python.exe') : join('.venv', 'bin', 'python');
 
         // Install requirements
-        if (existsSync(join(repoDir, 'requirements.txt'))) {
-          await spawnWithOutput(venvPip, ['install', '-r', 'requirements.txt'], { cwd: repoDir, env: processEnv }, onOutput);
-        } else if (existsSync(join(repoDir, 'pyproject.toml'))) {
-          await spawnWithOutput(venvPip, ['install', '.'], { cwd: repoDir, env: processEnv }, onOutput);
+        if (existsSync(join(cwd, 'requirements.txt'))) {
+          await spawnWithOutput(venvPip, ['install', '-r', 'requirements.txt'], { cwd, env: processEnv }, onOutput);
+        } else if (existsSync(join(cwd, 'pyproject.toml'))) {
+          await spawnWithOutput(venvPip, ['install', '.'], { cwd, env: processEnv }, onOutput);
         }
 
         // Install runtime-specific extras
         if (runtime.id === 'python-fastapi') {
-          await spawnWithOutput(venvPip, ['install', 'uvicorn'], { cwd: repoDir, env: processEnv }, onOutput);
+          await spawnWithOutput(venvPip, ['install', 'uvicorn'], { cwd, env: processEnv }, onOutput);
         }
         if (runtime.id === 'python-streamlit') {
-          await spawnWithOutput(venvPip, ['install', 'streamlit'], { cwd: repoDir, env: processEnv }, onOutput);
+          await spawnWithOutput(venvPip, ['install', 'streamlit'], { cwd, env: processEnv }, onOutput);
         }
 
         break;
       }
       case 'go':
-        await spawnWithOutput('go', ['mod', 'download'], { cwd: repoDir, env: processEnv }, onOutput);
+        await spawnWithOutput('go', ['mod', 'download'], { cwd, env: processEnv }, onOutput);
         break;
       case 'rust':
-        await spawnWithOutput('cargo', ['build', '--release'], { cwd: repoDir, env: processEnv }, onOutput);
+        await spawnWithOutput('cargo', ['build', '--release'], { cwd, env: processEnv }, onOutput);
         break;
       case 'ruby':
-        if (existsSync(join(repoDir, 'Gemfile'))) {
-          await spawnWithOutput('bundle', ['install'], { cwd: repoDir, env: processEnv }, onOutput);
+        if (existsSync(join(cwd, 'Gemfile'))) {
+          await spawnWithOutput('bundle', ['install'], { cwd, env: processEnv }, onOutput);
         }
         break;
       case 'node':
-        await spawnWithOutput('npm', ['install'], { cwd: repoDir, env: processEnv }, onOutput);
+        await spawnWithOutput('npm', ['install'], { cwd, env: processEnv }, onOutput);
         break;
       default:
         if (runtime.install) {
           const [cmd, ...args] = runtime.install.split(' ');
-          await spawnWithOutput(cmd, args, { cwd: repoDir, env: processEnv }, onOutput);
+          await spawnWithOutput(cmd, args, { cwd, env: processEnv }, onOutput);
         }
     }
   } catch (err) {
@@ -384,7 +390,7 @@ export async function startNativeProcess({ sessionId, repoDir, runtime, envVars,
   onOutput(`$ ${startCmd} ${startArgs.join(' ')}\n`);
 
   const appProcess = spawn(startCmd, startArgs, {
-    cwd: repoDir,
+    cwd,
     stdio: ['ignore', 'pipe', 'pipe'],
     env: processEnv,
     shell: true,

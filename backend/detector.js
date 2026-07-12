@@ -136,7 +136,7 @@ const RUNTIME_CONFIGS = [
     color: '#092e20',
     detect: (dir) => {
       const req = readFileSafe(join(dir, 'requirements.txt'));
-      return (req?.toLowerCase().includes('django') && !req?.toLowerCase().includes('djangorestframework') === false) || existsSync(join(dir, 'manage.py'));
+      return req?.toLowerCase().includes('django') || existsSync(join(dir, 'manage.py'));
     },
     getCommands: () => ({
       install: 'pip install -r requirements.txt',
@@ -277,28 +277,112 @@ const RUNTIME_CONFIGS = [
   },
 ];
 
+// Docker-based runtimes need a Docker daemon; everything else can run natively.
+const DOCKER_RUNTIME_IDS = new Set(['docker-compose', 'dockerfile']);
+
+// Common subfolders that hold the actual runnable app in a monorepo, in the
+// order we prefer them (a web-visible app first, then the API/server).
+const COMMON_SUBDIRS = [
+  'frontend', 'web', 'client', 'app', 'ui',
+  'backend', 'server', 'api', 'src', 'service',
+];
+
 /**
- * Detect the runtime of a cloned repo and return run configuration.
+ * Run every runtime config against a single directory and return the first
+ * match (config + resolved commands), or null when nothing matches.
  */
-export function detectRuntime(repoDir) {
+function matchRuntimeAt(dir) {
   for (const config of RUNTIME_CONFIGS) {
-    if (config.detect(repoDir)) {
-      const commands = config.getCommands(repoDir);
-      return {
-        id: config.id,
-        label: config.label,
-        icon: config.icon,
-        color: config.color,
-        ...commands,
-      };
+    try {
+      if (config.detect(dir)) {
+        return { config, commands: config.getCommands(dir) };
+      }
+    } catch {
+      // A broken detector for one runtime shouldn't stop the others.
     }
   }
+  return null;
+}
+
+/** Turn a matched config into the flat runtime object the rest of the app uses. */
+function toRuntime(match, workdir) {
+  const { config, commands } = match;
+  return {
+    id: config.id,
+    label: config.label,
+    icon: config.icon,
+    color: config.color,
+    workdir: workdir || '',
+    ...commands,
+  };
+}
+
+/**
+ * Look for a runnable, non-Docker (natively runnable) app at the repo root or
+ * one level down in a common subfolder. Returns a runtime object with the
+ * `workdir` set, or null. This is what lets us still run a repo whose root only
+ * has a Dockerfile when Docker isn't available.
+ */
+function findNativeRuntime(repoDir) {
+  // Root first.
+  const root = matchRuntimeAt(repoDir);
+  if (root && !DOCKER_RUNTIME_IDS.has(root.config.id)) {
+    return toRuntime(root, '');
+  }
+
+  // Then common subfolders, then any remaining immediate subdirectory.
+  const seen = new Set(COMMON_SUBDIRS);
+  let extras = [];
+  try {
+    extras = readdirSync(repoDir, { withFileTypes: true })
+      .filter((e) => e.isDirectory() && !SKIP_DIRS.has(e.name) && !seen.has(e.name))
+      .map((e) => e.name);
+  } catch {
+    // ignore
+  }
+
+  for (const sub of [...COMMON_SUBDIRS, ...extras]) {
+    const subPath = join(repoDir, sub);
+    if (!existsSync(subPath)) continue;
+    const match = matchRuntimeAt(subPath);
+    if (match && !DOCKER_RUNTIME_IDS.has(match.config.id)) {
+      return toRuntime(match, sub);
+    }
+  }
+  return null;
+}
+
+/**
+ * Detect the runtime of a cloned repo and return run configuration.
+ *
+ * The returned object always carries a `workdir` (relative to the repo root,
+ * '' for the root itself) and, when the primary runtime needs Docker, a
+ * `nativeFallback` describing how to run the same repo without Docker.
+ */
+export function detectRuntime(repoDir) {
+  const rootMatch = matchRuntimeAt(repoDir);
+
+  if (rootMatch) {
+    const runtime = toRuntime(rootMatch, '');
+    // If the root wants Docker, also work out a no-Docker way to run it so the
+    // server can fall back when the Docker daemon isn't available.
+    if (DOCKER_RUNTIME_IDS.has(rootMatch.config.id)) {
+      const fallback = findNativeRuntime(repoDir);
+      if (fallback) runtime.nativeFallback = fallback;
+    }
+    return runtime;
+  }
+
+  // Nothing at the root — maybe the real project lives in a subfolder.
+  const nested = findNativeRuntime(repoDir);
+  if (nested) return nested;
 
   return {
     id: 'unknown',
     label: 'Unknown',
     icon: '❓',
     color: '#888',
+    workdir: '',
     install: null,
     start: null,
     dockerfile: null,

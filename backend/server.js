@@ -115,20 +115,28 @@ app.post('/api/analyze', async (req, res) => {
     const runtime = detectRuntime(repoDir);
     const envVars = detectEnvVars(repoDir);
 
+    // When the primary runtime needs Docker but a natively-runnable app exists
+    // (often in a subfolder), report that as what will actually run.
+    const fallbackNative =
+      runtime.nativeFallback && canRunNatively(runtime.nativeFallback.id)
+        ? runtime.nativeFallback
+        : null;
+    const effective = canRunNatively(runtime.id) ? runtime : fallbackNative || runtime;
+
     res.json({
       sessionId,
       runtime: {
-        id: runtime.id,
-        label: runtime.label,
-        icon: runtime.icon,
-        color: runtime.color,
+        id: effective.id,
+        label: effective.label,
+        icon: effective.icon,
+        color: effective.color,
       },
       envVars,
       commands: {
-        install: runtime.install,
-        start: runtime.start,
+        install: effective.install,
+        start: effective.start,
       },
-      nativeAvailable: canRunNatively(runtime.id),
+      nativeAvailable: canRunNatively(runtime.id) || !!fallbackNative,
     });
   } catch (err) {
     // Clean up on failure
@@ -212,7 +220,13 @@ app.post('/api/run-native', async (req, res) => {
     return res.status(404).json({ error: 'Session not found. Analyze the repo first.' });
   }
 
-  const runtime = detectRuntime(repoDir);
+  let runtime = detectRuntime(repoDir);
+
+  // If the repo's primary runtime needs Docker (or is unknown) but we detected
+  // a natively-runnable app (possibly in a subfolder), run that instead.
+  if (!canRunNatively(runtime.id) && runtime.nativeFallback && canRunNatively(runtime.nativeFallback.id)) {
+    runtime = runtime.nativeFallback;
+  }
 
   if (!canRunNatively(runtime.id)) {
     return res.status(400).json({
