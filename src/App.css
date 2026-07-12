@@ -631,6 +631,13 @@ input::placeholder {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  text-decoration: none;
+  transition: color 0.15s ease;
+}
+
+a.url-chip:hover {
+  color: var(--accent, #6c8cff);
+  text-decoration: underline;
 }
 
 /* ─── Terminal ─── */

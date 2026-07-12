@@ -114,6 +114,15 @@ export default defineConfig({
       'Cross-Origin-Embedder-Policy': 'credentialless',
       'Cross-Origin-Opener-Policy': 'same-origin',
     },
+    watch: {
+      // Cloned repos and provisioned runtimes live under backend/ — don't let
+      // the file watcher reload the runner UI every time we clone/run a repo.
+      ignored: [
+        '**/backend/.repos/**',
+        '**/backend/.runtimes/**',
+        '**/backend/node_modules/**',
+      ],
+    },
   },
   preview: {
     headers: {

@@ -272,8 +272,10 @@ export default function App() {
           setExecutionMode('docker');
           writeLog(`\n\x1b[1;33m▸ Running via Docker sandbox...\x1b[0m\n`);
         } else {
-          // Neither native nor Docker available
-          setErrorMsg(`docker_offline:${analysis.runtime}`);
+          // Neither native nor Docker available — use the backend's detected
+          // runtime label (not the coarse frontend heuristic, which is often
+          // "unknown") so the message is accurate.
+          setErrorMsg(`docker_offline:${backendAnalysis.runtime.label}`);
           setStage(STAGES.ERROR);
           writeLog(`\n\x1b[1;33m⚠ ${backendAnalysis.runtime.label} is not installed locally and Docker is offline.\x1b[0m\n`);
           return;
@@ -650,18 +652,35 @@ export default function App() {
           {/* Error — show runtime unavailable banner or generic error */}
           {stage === STAGES.ERROR && errorMsg.startsWith('docker_offline:') ? (() => {
             const runtimeName = errorMsg.split(':')[1];
+            const isUnknown = !runtimeName || /^unknown$/i.test(runtimeName);
             return (
               <div className="docker-banner">
                 <div className="docker-banner-icon">🐳</div>
                 <div className="docker-banner-content">
-                  <h4>{runtimeName} Runtime Not Found</h4>
-                  <p>
-                    This is a <strong>{runtimeName}</strong> project. To run it, either:
-                  </p>
-                  <ul className="docker-banner-options">
-                    <li>Install <strong>{runtimeName}</strong> on your machine (recommended — fastest)</li>
-                    <li>Or start <strong>Docker Desktop</strong> to run in a sandbox</li>
-                  </ul>
+                  {isUnknown ? (
+                    <>
+                      <h4>Couldn't detect how to run this repo</h4>
+                      <p>
+                        No recognized runtime (package.json, requirements.txt,
+                        go.mod, Dockerfile, etc.) was found. To run it anyway:
+                      </p>
+                      <ul className="docker-banner-options">
+                        <li>Start <strong>Docker Desktop</strong> so it can build from a Dockerfile/compose file</li>
+                        <li>Or double-check the repo URL points at a runnable app</li>
+                      </ul>
+                    </>
+                  ) : (
+                    <>
+                      <h4>{runtimeName} Runtime Not Found</h4>
+                      <p>
+                        This is a <strong>{runtimeName}</strong> project. To run it, either:
+                      </p>
+                      <ul className="docker-banner-options">
+                        <li>Install <strong>{runtimeName}</strong> on your machine (recommended — fastest)</li>
+                        <li>Or start <strong>Docker Desktop</strong> to run in a sandbox</li>
+                      </ul>
+                    </>
+                  )}
                   <button
                     className="btn-check-again"
                     onClick={async () => {
@@ -732,10 +751,24 @@ export default function App() {
           <div className="pane-header">
             <span className="pane-header-icon">👁</span>
             Live Preview
-            {previewUrl && <span className="url-chip">{previewUrl}</span>}
+            {previewUrl && (
+              <a className="url-chip" href={previewUrl} target="_blank" rel="noreferrer">
+                {previewUrl} ↗
+              </a>
+            )}
           </div>
           {previewUrl ? (
-            <iframe title="preview" src={previewUrl} className="preview-frame" />
+            <iframe
+              title="preview"
+              src={previewUrl}
+              className="preview-frame"
+              // `credentialless` lets this cross-origin-isolated page (COOP/COEP,
+              // needed for WebContainers) embed a cross-origin localhost app that
+              // doesn't send COEP itself. Without it the browser blocks the frame.
+              credentialless=""
+              ref={(el) => el && el.setAttribute('credentialless', '')}
+              allow="accelerometer; camera; encrypted-media; geolocation; gyroscope; microphone; clipboard-read; clipboard-write"
+            />
           ) : (
             <div className="preview-empty">
               <div className="preview-empty-icon">🌐</div>
