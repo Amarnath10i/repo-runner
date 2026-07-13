@@ -621,11 +621,6 @@ export default function App() {
                {isBusy && (
                  <div className="building-state">
                    <div className="loading-calligraphy">Preview<span className="dots" /></div>
-                   <div className="ios-spinner">
-                     {Array.from({ length: 12 }).map((_, i) => (
-                       <span key={i} style={{ '--i': i }} />
-                     ))}
-                   </div>
                    <div className="progress-track">
                      <div className="progress-fill" style={{ width: `${progressPct}%` }} />
                    </div>

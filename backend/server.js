@@ -185,7 +185,7 @@ app.post('/api/run', async (req, res) => {
       },
     });
 
-    const previewUrl = `http://127.0.0.1:${hostPort}`;
+    const previewUrl = `http://localhost:${hostPort}`;
 
     broadcast(sessionId, {
       type: 'stage',
@@ -279,7 +279,7 @@ app.post('/api/run-native', async (req, res) => {
       return;
     }
 
-    const previewUrl = `http://127.0.0.1:${hostPort}`;
+    const previewUrl = `http://localhost:${hostPort}`;
 
     broadcast(sessionId, {
       type: 'stage',
@@ -375,7 +375,7 @@ app.get('/api/status/:sessionId', (req, res) => {
     port: session.hostPort,
     runtime: session.runtime.label,
     mode: nativeSession ? 'native' : 'docker',
-    previewUrl: `http://127.0.0.1:${session.hostPort}`,
+    previewUrl: `http://localhost:${session.hostPort}`,
   });
 });
 
