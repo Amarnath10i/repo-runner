@@ -556,7 +556,7 @@ export default function App() {
         <div className="topbar-right">
           {stage !== STAGES.IDLE && (
             <button className="btn-stop-global" type="button" onClick={handleStop}>
-              <span className="stop-icon">■</span> Stop
+              Stop
             </button>
           )}
           <div className={`backend-badge ${dockerOnline ? 'online' : serverOnline ? 'warning' : 'offline'}`}>
