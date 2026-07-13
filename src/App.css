@@ -325,15 +325,27 @@ body {
   background: transparent;
   border: none;
   padding: 1.5rem 2rem;
-  font-family: var(--font-mono);
-  font-size: 1.1rem;
-  color: var(--text-primary);
+  font-family: 'Caveat', cursive;
+  font-size: 1.6rem;
+  color: rgba(255, 255, 255, 0.9);
+  font-weight: 600;
+  letter-spacing: 0.08em;
   outline: none;
+}
+
+/* Fix for browser autofill background */
+.hero-input:-webkit-autofill,
+.hero-input:-webkit-autofill:hover, 
+.hero-input:-webkit-autofill:focus, 
+.hero-input:-webkit-autofill:active {
+  -webkit-box-shadow: 0 0 0 30px transparent inset !important;
+  -webkit-text-fill-color: rgba(255, 255, 255, 0.9) !important;
+  transition: background-color 5000s ease-in-out 0s;
 }
 
 .hero-input::placeholder {
   font-family: 'Caveat', cursive;
-  font-size: 1.4rem;
+  font-size: 1.6rem;
   color: rgba(255, 255, 255, 0.6);
   font-weight: 600;
   letter-spacing: 0.08em;
