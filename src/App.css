@@ -223,6 +223,25 @@ body {
   to { opacity: 1; transform: translateY(0); }
 }
 
+.hero-brand {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  margin-bottom: 2.5rem;
+}
+
+.hero-icon {
+  opacity: 0.9;
+}
+
+.hero-size .brand-git {
+  font-size: 3.5rem;
+}
+
+.hero-size .brand-live {
+  font-size: 5rem;
+}
+
 .hero-tagline {
   font-family: 'Great Vibes', cursive;
   font-size: 2.8rem;
