@@ -2,12 +2,12 @@
 
 /* ─── Design Tokens ─── */
 :root {
-  --bg-deep: #020408;
-  --bg-base: #05070e;
-  --bg-surface: rgba(8, 12, 22, 0.75);
-  --bg-surface-hover: rgba(12, 18, 32, 0.85);
-  --bg-elevated: rgba(10, 16, 30, 0.5);
-  --bg-card: rgba(8, 14, 28, 0.55);
+  --bg-deep: #000000;
+  --bg-base: #000000;
+  --bg-surface: rgba(0, 0, 0, 0.85);
+  --bg-surface-hover: rgba(8, 8, 16, 0.9);
+  --bg-elevated: rgba(4, 4, 12, 0.6);
+  --bg-card: rgba(4, 6, 14, 0.5);
 
   --border-subtle: rgba(80, 100, 180, 0.07);
   --border-medium: rgba(80, 100, 180, 0.12);
@@ -72,8 +72,8 @@ body {
   position: fixed;
   inset: 0;
   background:
-    radial-gradient(ellipse 70% 50% at 10% 20%, rgba(90, 122, 238, 0.03) 0%, transparent 60%),
-    radial-gradient(ellipse 50% 40% at 85% 75%, rgba(139, 114, 224, 0.025) 0%, transparent 60%);
+    radial-gradient(ellipse 70% 50% at 10% 20%, rgba(90, 122, 238, 0.02) 0%, transparent 60%),
+    radial-gradient(ellipse 50% 40% at 85% 75%, rgba(139, 114, 224, 0.015) 0%, transparent 60%);
   pointer-events: none;
   z-index: 0;
   animation: bg-drift 30s ease-in-out infinite alternate;
@@ -90,7 +90,7 @@ body {
   align-items: center;
   gap: 1rem;
   padding: 0.7rem 1.5rem;
-  background: rgba(5, 7, 14, 0.7);
+  background: rgba(0, 0, 0, 0.9);
   backdrop-filter: blur(24px) saturate(1.3);
   -webkit-backdrop-filter: blur(24px) saturate(1.3);
   border-bottom: 1px solid var(--border-subtle);
@@ -198,7 +198,7 @@ body {
   display: grid;
   grid-template-columns: 340px 1fr 1fr;
   gap: 1px;
-  background: rgba(80, 100, 180, 0.04);
+  background: rgba(255, 255, 255, 0.02);
   position: relative;
   z-index: 1;
   min-height: 0;
@@ -208,7 +208,7 @@ body {
 .control-pane,
 .output-pane,
 .preview-pane {
-  background: var(--bg-base);
+  background: rgba(0, 0, 0, 0.95);
   display: flex;
   flex-direction: column;
   min-height: 0;
@@ -337,7 +337,7 @@ input[type="text"],
 input[type="password"],
 input[type="url"] {
   width: 100%;
-  background: rgba(5, 7, 14, 0.8);
+  background: rgba(0, 0, 0, 0.9);
   border: 1px solid var(--border-medium);
   border-radius: var(--radius-sm);
   color: var(--text-primary);
@@ -628,7 +628,7 @@ input:disabled {
   display: flex;
   align-items: center;
   gap: 0.5rem;
-  background: rgba(5, 7, 14, 0.7);
+  background: rgba(0, 0, 0, 0.9);
   backdrop-filter: blur(12px);
 }
 
@@ -677,7 +677,7 @@ a.url-chip:hover {
   flex: 1;
   padding: 0.5rem;
   min-height: 0;
-  background: #030508;
+  background: #000000;
 }
 
 /* ─── Preview ─── */
@@ -737,82 +737,6 @@ a.url-chip:hover {
   font-size: 0.72rem;
   color: var(--text-muted);
   opacity: 0.6;
-}
-
-/* ─── How It Works (Idle State) ─── */
-.how-it-works {
-  display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
-  padding: 0.75rem;
-  background: var(--bg-card);
-  border-radius: var(--radius-md);
-  border: 1px solid var(--border-card);
-}
-
-.how-it-works h4 {
-  font-size: 0.65rem;
-  font-weight: 600;
-  color: var(--text-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.1em;
-}
-
-.how-step {
-  display: flex;
-  gap: 0.55rem;
-  align-items: flex-start;
-  font-size: 0.72rem;
-  color: var(--text-muted);
-  line-height: 1.4;
-}
-
-.how-step-num {
-  width: 18px;
-  height: 18px;
-  border-radius: 50%;
-  background: transparent;
-  border: 1px solid var(--border-medium);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 0.58rem;
-  font-weight: 600;
-  color: var(--text-muted);
-  flex-shrink: 0;
-}
-
-/* ─── Supported Runtimes Grid ─── */
-.runtimes-grid {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.3rem;
-  margin-top: 0.2rem;
-}
-
-.runtime-chip {
-  font-size: 0.6rem;
-  padding: 0.15rem 0.45rem;
-  border-radius: 100px;
-  background: transparent;
-  border: 1px solid var(--border-subtle);
-  color: var(--text-muted);
-  display: flex;
-  align-items: center;
-  gap: 0.2rem;
-  transition: var(--transition-fast);
-}
-
-.runtime-chip:hover {
-  border-color: var(--border-medium);
-  color: var(--text-secondary);
-}
-
-.runtime-dot {
-  width: 4px;
-  height: 4px;
-  border-radius: 50%;
-  flex-shrink: 0;
 }
 
 /* ─── Progress Bar ─── */

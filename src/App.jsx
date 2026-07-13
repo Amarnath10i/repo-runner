@@ -673,37 +673,6 @@ export default function App() {
             <div className="error-box">{errorMsg}</div>
           ) : null}
 
-          {/* How it works — idle state */}
-          {stage === STAGES.IDLE && (
-            <div className="how-it-works">
-              <h4>How it works</h4>
-              <div className="how-step">
-                <span className="how-step-num">1</span>
-                <span>Paste any GitHub repo URL and click "Fetch & Run"</span>
-              </div>
-              <div className="how-step">
-                <span className="how-step-num">2</span>
-                <span>We clone and auto-detect the runtime & dependencies</span>
-              </div>
-              <div className="how-step">
-                <span className="how-step-num">3</span>
-                <span>Node.js runs in-browser. Python, Go, Rust, etc. run natively</span>
-              </div>
-              <div className="how-step">
-                <span className="how-step-num">4</span>
-                <span>See the live preview instantly — no setup needed</span>
-              </div>
-              <div className="runtimes-grid">
-                {SUPPORTED_RUNTIMES.map((r) => (
-                  <span key={r.label} className="runtime-chip">
-                    <span className="runtime-dot" style={{ background: r.color }} />
-                    {r.label}
-                  </span>
-                ))}
-              </div>
-            </div>
-          )}
-
           {/* Status */}
           <div className="status-line">
             <StatusDot stage={stage} />
