@@ -502,6 +502,17 @@ body {
   text-shadow: 0 0 15px rgba(34, 211, 238, 0.4);
 }
 
+.step-count {
+  font-size: 0.9rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+  text-shadow: none;
+  padding: 0.1rem 0.5rem;
+  border: 1px solid var(--border-medium);
+  border-radius: 999px;
+}
+
 .loading-overlay {
   position: absolute;
   top: 0;

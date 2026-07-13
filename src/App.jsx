@@ -549,6 +549,7 @@ export default function App() {
             <div className="active-step-only">
               <span className="step-dot active"></span>
               {PIPELINE_STEPS[currentStepIdx].label}
+              <span className="step-count">{currentStepIdx + 1}/{PIPELINE_STEPS.length}</span>
             </div>
           )}
         </div>
