@@ -534,6 +534,31 @@ export default function App() {
           <span className="brand-name">Repo Runner</span>
         </div>
         
+        <div className="topbar-center">
+          {stage !== STAGES.IDLE && (
+            <div className="horizontal-stepper">
+              {PIPELINE_STEPS.map((step, i) => {
+                const idx = stepIndex(step.key);
+                let cls = '';
+                if (stage === STAGES.ERROR && currentStepIdx >= 0 && idx === currentStepIdx) cls = 'error';
+                else if (stage === STAGES.READY && idx <= stepIndex('live')) cls = 'done';
+                else if (currentStepIdx >= 0 && idx < currentStepIdx) cls = 'done';
+                else if (currentStepIdx >= 0 && idx === currentStepIdx) cls = 'active';
+
+                return (
+                  <span key={step.key} style={{ display: 'contents' }}>
+                    {i > 0 && <span className={`step-connector ${cls === 'done' ? 'done' : cls === 'active' ? 'active' : ''}`} />}
+                    <span className={`step-item ${cls}`}>
+                      <span className="step-dot" />
+                      {step.label}
+                    </span>
+                  </span>
+                );
+              })}
+            </div>
+          )}
+        </div>
+
         <div className="topbar-right">
           {stage !== STAGES.IDLE && (
             <button className="btn-stop-global" type="button" onClick={handleStop}>
@@ -582,27 +607,6 @@ export default function App() {
           {/* Loading Overlay (Horizontal Pipeline) */}
           {stage !== STAGES.READY && stage !== STAGES.IDLE && (
             <div className="loading-overlay">
-              <div className="horizontal-stepper">
-                {PIPELINE_STEPS.map((step, i) => {
-                  const idx = stepIndex(step.key);
-                  let cls = '';
-                  if (stage === STAGES.ERROR && currentStepIdx >= 0 && idx === currentStepIdx) cls = 'error';
-                  else if (stage === STAGES.READY && idx <= stepIndex('live')) cls = 'done';
-                  else if (currentStepIdx >= 0 && idx < currentStepIdx) cls = 'done';
-                  else if (currentStepIdx >= 0 && idx === currentStepIdx) cls = 'active';
-
-                  return (
-                    <span key={step.key} style={{ display: 'contents' }}>
-                      {i > 0 && <span className={`step-connector ${cls === 'done' ? 'done' : cls === 'active' ? 'active' : ''}`} />}
-                      <span className={`step-item ${cls}`}>
-                        <span className="step-dot" />
-                        {step.label}
-                      </span>
-                    </span>
-                  );
-                })}
-              </div>
-
               <div className="workspace-status-bar">
                 <div className="workspace-status-content">
                   <div className="status-line compact">

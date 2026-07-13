@@ -131,6 +131,13 @@ body {
   font-weight: 400;
 }
 
+.topbar-center {
+  flex: 1;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+}
+
 .topbar-right {
   margin-left: auto;
   display: flex;
@@ -425,11 +432,6 @@ body {
   display: flex;
   align-items: center;
   gap: 1.5rem;
-  padding: 1rem 2rem;
-  background: rgba(255, 255, 255, 0.02);
-  border: 1px solid var(--border-subtle);
-  border-radius: 100px;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
 }
 
 .step-item {
