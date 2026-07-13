@@ -211,6 +211,12 @@ export default function App() {
     termInstance.current?.write(text.replace(/\n/g, '\r\n'));
   }, []);
 
+  useEffect(() => {
+    if (stage === STAGES.READY) {
+      setIsTerminalOpen(false);
+    }
+  }, [stage]);
+
   // ─── Main Flow ───
 
   async function handleFetchRepo(e) {
@@ -528,30 +534,12 @@ export default function App() {
           <span className="brand-name">Repo Runner</span>
         </div>
         
-        {stage !== STAGES.IDLE && (
-          <div className="pipeline compact">
-            {PIPELINE_STEPS.map((step, i) => {
-              const idx = stepIndex(step.key);
-              let cls = '';
-              if (stage === STAGES.ERROR && currentStepIdx >= 0 && idx === currentStepIdx) cls = 'error';
-              else if (stage === STAGES.READY && idx <= stepIndex('live')) cls = 'done';
-              else if (currentStepIdx >= 0 && idx < currentStepIdx) cls = 'done';
-              else if (currentStepIdx >= 0 && idx === currentStepIdx) cls = 'active';
-
-              return (
-                <span key={step.key} style={{ display: 'contents' }}>
-                  {i > 0 && <span className={`pipeline-connector${cls === 'done' ? ' done' : cls === 'active' ? ' active' : ''}`} />}
-                  <span className={`pipeline-stage ${cls}`}>
-                    <span className="stage-dot" />
-                    {step.label}
-                  </span>
-                </span>
-              );
-            })}
-          </div>
-        )}
-
         <div className="topbar-right">
+          {stage !== STAGES.IDLE && (
+            <button className="btn-stop-global" type="button" onClick={handleStop}>
+              <span className="stop-icon">■</span> Stop
+            </button>
+          )}
           <div className={`backend-badge ${dockerOnline ? 'online' : serverOnline ? 'warning' : 'offline'}`}>
             <span className="badge-dot" />
             {dockerOnline ? 'Docker Online' : serverOnline ? 'Docker Offline' : 'Server Offline'}
@@ -591,41 +579,62 @@ export default function App() {
         {/* Main workspace area (Preview takes over) */}
         <div className="workspace-main">
           
-          {/* Overlay Status Bar */}
-          <div className="workspace-status-bar">
-             <div className="workspace-status-content">
-               <div className="status-line compact">
-                 <StatusDot stage={stage} />
-                 <span>{statusLabel(stage)}</span>
-                 {isBusy && progressEta && <span className="eta-text">ETA: {progressEta}</span>}
-               </div>
-               
-               {runtimeInfo && (
-                 <div className="runtime-badge compact" style={{ color: runtimeInfo.color, borderColor: runtimeInfo.color + '22', background: runtimeInfo.color + '08' }}>
-                   {runtimeInfo.label}
-                   {executionMode && (
-                     <span style={{ opacity: 0.5, fontSize: '0.6rem', marginLeft: '0.15rem' }}>
-                       via {executionMode === 'webcontainer' ? 'WebContainer' : executionMode === 'native' ? 'Native' : 'Docker'}
-                     </span>
-                   )}
-                 </div>
-               )}
-               
-               {(stage === STAGES.READY || stage === STAGES.RUNNING || stage === STAGES.BUILDING) && (
-                 <button className="btn-stop-compact" type="button" onClick={handleStop}>Stop</button>
-               )}
-             </div>
-             
-             {/* Integrated Progress Bar */}
-             {(isBusy || stage === STAGES.READY || stage === STAGES.NEEDS_ENV) && (
-               <div className="status-progress-track">
-                 <div 
-                   className={`status-progress-fill ${stage === STAGES.READY ? 'done' : ''}`} 
-                   style={{ width: `${progressPct}%` }} 
-                 />
-               </div>
-             )}
-          </div>
+          {/* Loading Overlay (Horizontal Pipeline) */}
+          {stage !== STAGES.READY && stage !== STAGES.IDLE && (
+            <div className="loading-overlay">
+              <div className="horizontal-stepper">
+                {PIPELINE_STEPS.map((step, i) => {
+                  const idx = stepIndex(step.key);
+                  let cls = '';
+                  if (stage === STAGES.ERROR && currentStepIdx >= 0 && idx === currentStepIdx) cls = 'error';
+                  else if (stage === STAGES.READY && idx <= stepIndex('live')) cls = 'done';
+                  else if (currentStepIdx >= 0 && idx < currentStepIdx) cls = 'done';
+                  else if (currentStepIdx >= 0 && idx === currentStepIdx) cls = 'active';
+
+                  return (
+                    <span key={step.key} style={{ display: 'contents' }}>
+                      {i > 0 && <span className={`step-connector ${cls === 'done' ? 'done' : cls === 'active' ? 'active' : ''}`} />}
+                      <span className={`step-item ${cls}`}>
+                        <span className="step-dot" />
+                        {step.label}
+                      </span>
+                    </span>
+                  );
+                })}
+              </div>
+
+              <div className="workspace-status-bar">
+                <div className="workspace-status-content">
+                  <div className="status-line compact">
+                    <StatusDot stage={stage} />
+                    <span>{statusLabel(stage)}</span>
+                    {isBusy && progressEta && <span className="eta-text">ETA: {progressEta}</span>}
+                  </div>
+                  
+                  {runtimeInfo && (
+                    <div className="runtime-badge compact" style={{ color: runtimeInfo.color, borderColor: runtimeInfo.color + '22', background: runtimeInfo.color + '08' }}>
+                      {runtimeInfo.label}
+                      {executionMode && (
+                        <span style={{ opacity: 0.5, fontSize: '0.6rem', marginLeft: '0.15rem' }}>
+                          via {executionMode === 'webcontainer' ? 'WebContainer' : executionMode === 'native' ? 'Native' : 'Docker'}
+                        </span>
+                      )}
+                    </div>
+                  )}
+                </div>
+                
+                {/* Integrated Progress Bar */}
+                {(isBusy || stage === STAGES.NEEDS_ENV) && (
+                  <div className="status-progress-track">
+                    <div 
+                      className={`status-progress-fill ${stage === STAGES.READY ? 'done' : ''}`} 
+                      style={{ width: `${progressPct}%` }} 
+                    />
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
 
           {previewUrl ? (
              <iframe
