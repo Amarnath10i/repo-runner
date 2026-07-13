@@ -99,13 +99,31 @@ body {
   gap: 0.6rem;
 }
 
-.brand-name {
+.github-icon {
+  color: #fff;
+  opacity: 0.9;
+  transition: transform var(--transition-smooth);
+}
+
+.brand-text {
+  display: flex;
+  align-items: center;
+}
+
+.brand-git {
+  font-family: var(--font-sans);
+  font-weight: 800;
+  font-size: 1.5rem;
+  letter-spacing: 0.03em;
+  color: #fff;
+}
+
+.brand-live {
   font-family: 'Caveat', cursive;
   font-weight: 700;
-  font-size: 1.8rem;
-  color: var(--text-primary);
-  opacity: 0.95;
-  letter-spacing: 0.02em;
+  font-size: 2.1rem;
+  color: #00bfff; /* Bright cyan/blue */
+  margin-left: 2px;
   transform: translateY(2px);
 }
 
