@@ -1,4 +1,4 @@
-@import url('https://fonts.googleapis.com/css2?family=Caveat:wght@600;700&family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Caveat:wght@600;700&family=Great+Vibes&family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap');
 
 /* ─── Design Tokens ─── */
 :root {
@@ -119,12 +119,15 @@ body {
 }
 
 .brand-live {
-  font-family: 'Caveat', cursive;
-  font-weight: 700;
-  font-size: 2.1rem;
-  color: #00bfff; /* Bright cyan/blue */
+  font-family: 'Great Vibes', cursive;
+  font-weight: 400;
+  font-size: 2.6rem;
+  background: linear-gradient(90deg, #8b0000, #5a0032, #1a0050);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
   margin-left: 2px;
-  transform: translateY(2px);
+  transform: translateY(8px);
+  align-self: flex-end;
 }
 
 .brand-tag {
