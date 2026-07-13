@@ -143,7 +143,7 @@ export async function startSandbox({ sessionId, repoDir, runtime, envVars, onOut
 
   if (runtime.id === 'docker-compose') {
     // For docker-compose projects, use docker compose directly
-    onOutput('⚠ Docker Compose projects are complex — building with docker compose...\n');
+    onOutput('[warning] Docker Compose projects are complex — building with docker compose...\n');
     // Fall through to single-container mode using the first service
   }
 
@@ -156,7 +156,7 @@ export async function startSandbox({ sessionId, repoDir, runtime, envVars, onOut
   const dockerfilePath = generatedDf !== null ? '.repo-runner.Dockerfile' : 'Dockerfile';
 
   // Build the image
-  onOutput(`\n🔨 Building Docker image (${runtime.label})...\n`);
+  onOutput(`\n[build] Building Docker image (${runtime.label})...\n`);
 
   try {
     const buildStream = await docker.buildImage(
@@ -180,21 +180,21 @@ export async function startSandbox({ sessionId, repoDir, runtime, envVars, onOut
             onOutput(event.stream);
           }
           if (event.error) {
-            onOutput(`❌ Build error: ${event.error}\n`);
+            onOutput(`[error] Build error: ${event.error}\n`);
           }
         }
       );
     });
 
-    onOutput(`\n✅ Image built successfully\n`);
+    onOutput(`\n[ready] Image built successfully\n`);
   } catch (err) {
-    onOutput(`\n❌ Docker build failed: ${err.message}\n`);
+    onOutput(`\n[error] Docker build failed: ${err.message}\n`);
     releasePort(hostPort);
     throw err;
   }
 
   // Create and start container
-  onOutput(`\n🚀 Starting container on port ${hostPort}...\n`);
+  onOutput(`\n[start] Starting container on port ${hostPort}...\n`);
 
   const envArray = envVars
     ? Object.entries(envVars).map(([k, v]) => `${k}=${v}`)
@@ -220,7 +220,7 @@ export async function startSandbox({ sessionId, repoDir, runtime, envVars, onOut
     });
 
     await container.start();
-    onOutput(`\n✅ Container started! App available on port ${hostPort}\n`);
+    onOutput(`\n[ready] Container started! App available on port ${hostPort}\n`);
 
     // Attach to container output
     const logStream = await container.logs({
@@ -261,7 +261,7 @@ export async function startSandbox({ sessionId, repoDir, runtime, envVars, onOut
 
     return { hostPort, containerPort };
   } catch (err) {
-    onOutput(`\n❌ Container start failed: ${err.message}\n`);
+    onOutput(`\n[error] Container start failed: ${err.message}\n`);
     releasePort(hostPort);
     // Try to remove the image
     try {

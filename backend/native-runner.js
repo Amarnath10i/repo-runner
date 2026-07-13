@@ -258,7 +258,7 @@ async function waitForServer({ hostPort, observedPorts, timeoutMs = 60000, onOut
     for (const p of [hostPort, ...observedPorts]) {
       if (await isPortOpen(p)) {
         if (p !== hostPort) {
-          onOutput?.(`\nℹ App bound port ${p} (it ignores $PORT=${hostPort}) — using that for the preview.\n`);
+          onOutput?.(`\n[info] App bound port ${p} (it ignores $PORT=${hostPort}) — using that for the preview.\n`);
         }
         return p;
       }
@@ -269,7 +269,7 @@ async function waitForServer({ hostPort, observedPorts, timeoutMs = 60000, onOut
   for (const p of COMMON_APP_PORTS) {
     if (p === hostPort) continue;
     if (await isPortOpen(p)) {
-      onOutput?.(`\nℹ Detected app on port ${p} — using that for the preview.\n`);
+      onOutput?.(`\n[info] Detected app on port ${p} — using that for the preview.\n`);
       return p;
     }
   }
@@ -316,7 +316,7 @@ async function installDeps({ runtime, cwd, processEnv, runtimes, onOutput }) {
         Object.assign(runtimes, checkNativeRuntimes());
       }
       const python = runtimes.pythonCmd || 'python';
-      onOutput(`\n🐍 Setting up Python virtual environment (using: ${python})...\n`);
+      onOutput(`\n[setup] Setting up Python virtual environment (using: ${python})...\n`);
       if (!existsSync(join(cwd, '.venv'))) {
         await spawnWithOutput(python, ['-m', 'venv', '.venv'], { cwd, env: processEnv }, onOutput);
       }
@@ -333,7 +333,7 @@ async function installDeps({ runtime, cwd, processEnv, runtimes, onOutput }) {
         // scripts (e.g. ML pipelines) don't die on ModuleNotFoundError.
         const pkgs = inferPipPackages(cwd);
         if (pkgs.length) {
-          onOutput(`\n📦 No requirements file — installing inferred packages: ${pkgs.join(', ')}\n`);
+          onOutput(`\n[install] No requirements file — installing inferred packages: ${pkgs.join(', ')}\n`);
           await spawnWithOutput(venvPip, ['install', ...pkgs], { cwd, env: processEnv }, onOutput);
         }
       }
@@ -429,7 +429,7 @@ function spawnApp({ startCmd, startArgs, cwd, processEnv, onOutput }) {
   });
   proc.stdout.on('data', (data) => onOutput(data.toString()));
   proc.stderr.on('data', (data) => onOutput(data.toString()));
-  proc.on('error', (err) => onOutput(`\n❌ Process error: ${err.message}\n`));
+  proc.on('error', (err) => onOutput(`\n[error] Process error: ${err.message}\n`));
   return proc;
 }
 
@@ -572,12 +572,12 @@ async function startConsoleApp({ sessionId, repoDir, runtime, cwd, envVars, runt
     const cc = useC ? (isCommandAvailable('gcc') ? 'gcc' : compiler) : compiler;
     const std = useC ? '-std=c11' : '-std=c++17';
 
-    onOutput(`\n🔨 Compiling ${sources.length} source file(s) with ${cc}...\n`);
+    onOutput(`\n[build] Compiling ${sources.length} source file(s) with ${cc}...\n`);
     const compile = await spawnWithOutput(cc, [...sources, '-O2', std, '-o', outBin], { cwd, env: processEnv }, onOutput);
     if (compile.code !== 0) {
       throw new Error(`Compilation failed (exit code ${compile.code}). See the errors above.`);
     }
-    onOutput(`\n✅ Compiled successfully. Running the program:\n`);
+    onOutput(`\n[ready] Compiled successfully. Running the program:\n`);
     onOutput(`\x1b[2m(this is a console program — output appears here; it has no web preview)\x1b[0m\n\n`);
 
     const runPath = isWin ? outBin : `./${outBin}`;
@@ -618,13 +618,13 @@ async function startStaticSite({ sessionId, repoDir, runtime, cwd, runtimes, onO
   if (entry !== 'index.html' && !existsSync(join(cwd, 'index.html'))) {
     try {
       copyFileSync(join(cwd, entry), join(cwd, 'index.html'));
-      onOutput(`\n📄 Using ${entry} as the home page (served at /).\n`);
+      onOutput(`\n[info] Using ${entry} as the home page (served at /).\n`);
     } catch {
       // If the copy fails, the site is still reachable at /<entry>.
     }
   }
 
-  onOutput(`\n🌐 Serving static site on port ${hostPort}...\n`);
+  onOutput(`\n[serve] Serving static site on port ${hostPort}...\n`);
   const proc = spawnApp({
     startCmd: python,
     startArgs: ['-m', 'http.server', String(hostPort), '--bind', '0.0.0.0'],
@@ -644,9 +644,9 @@ async function startStaticSite({ sessionId, repoDir, runtime, cwd, runtimes, onO
 
   try {
     await waitForPort(hostPort, 30000);
-    onOutput(`\n✅ Static site is live on port ${hostPort}!\n`);
+    onOutput(`\n[ready] Static site is live on port ${hostPort}!\n`);
   } catch {
-    onOutput(`\n⚠ Port ${hostPort} not detected — the server may still be starting.\n`);
+    onOutput(`\n[warning] Port ${hostPort} not detected — the server may still be starting.\n`);
   }
   return { hostPort };
 }
@@ -660,7 +660,7 @@ export async function startNativeProcess({ sessionId, repoDir, runtime, envVars,
   // The runnable app may live in a subfolder (monorepo) — run everything there.
   const cwd = runtime.workdir ? join(repoDir, runtime.workdir) : repoDir;
   if (runtime.workdir) {
-    onOutput(`\n📂 Project detected in ./${runtime.workdir} — running there.\n`);
+    onOutput(`\n[info] Project detected in ./${runtime.workdir} — running there.\n`);
   }
 
   // Console programs (C/C++) have no web server — compile & run to the terminal.
@@ -690,16 +690,16 @@ export async function startNativeProcess({ sessionId, repoDir, runtime, envVars,
   };
 
   // ─── Install dependencies ───
-  onOutput(`\n📦 Installing dependencies...\n`);
+  onOutput(`\n[install] Installing dependencies...\n`);
   try {
     await installDeps({ runtime, cwd, processEnv, runtimes, onOutput });
   } catch (err) {
-    onOutput(`\n⚠ Install warning: ${err.message}\n`);
+    onOutput(`\n[warning] Install warning: ${err.message}\n`);
     // Continue anyway — some projects work without full install
   }
 
   // ─── Start the app ───
-  onOutput(`\n🚀 Starting app on port ${hostPort}...\n`);
+  onOutput(`\n[start] Starting app on port ${hostPort}...\n`);
   const { startCmd, startArgs } = buildStartCommand({ runtime, hostPort, processEnv });
   const observer = createPortObserver();
   const appProcess = spawnApp({
@@ -727,10 +727,10 @@ export async function startNativeProcess({ sessionId, repoDir, runtime, envVars,
   const readyPort = await waitForServer({ hostPort, observedPorts: observer.ports, timeoutMs: 60000, onOutput });
   if (readyPort) {
     session.hostPort = readyPort;
-    onOutput(`\n✅ App is live on port ${readyPort}!\n`);
+    onOutput(`\n[ready] App is live on port ${readyPort}!\n`);
     return { hostPort: readyPort };
   }
-  onOutput(`\n⚠ No open port detected — the app may have failed to start (check the logs above).\n`);
+  onOutput(`\n[warning] No open port detected — the app may have failed to start (check the logs above).\n`);
   return { hostPort };
 }
 
@@ -760,23 +760,23 @@ export async function startCompoundNative({ sessionId, repoDir, services, envVar
     const backendPort = getAvailablePort();
     ports.push(backendPort);
     const cwd = backend.workdir ? join(repoDir, backend.workdir) : repoDir;
-    onOutput(`\n🧩 Backend: ${backend.runtime.icon} ${backend.runtime.label} in ./${backend.workdir || '.'} → port ${backendPort}\n`);
+    onOutput(`\n[info] Backend: ${backend.runtime.label} in ./${backend.workdir || '.'} → port ${backendPort}\n`);
     const bEnv = { ...baseEnv, PORT: String(backendPort) };
     writeEnvFile(cwd, envVars, onOutput);
-    onOutput(`\n📦 Installing backend dependencies...\n`);
+    onOutput(`\n[install] Installing backend dependencies...\n`);
     try {
       await installDeps({ runtime: backend.runtime, cwd, processEnv: bEnv, runtimes, onOutput });
     } catch (err) {
-      onOutput(`\n⚠ Backend install warning: ${err.message}\n`);
+      onOutput(`\n[warning] Backend install warning: ${err.message}\n`);
     }
     const { startCmd, startArgs } = buildStartCommand({ runtime: backend.runtime, hostPort: backendPort, processEnv: bEnv });
-    onOutput(`\n🚀 Starting backend...\n`);
+    onOutput(`\n[start] Starting backend...\n`);
     processes.push(spawnApp({ startCmd, startArgs, cwd, processEnv: bEnv, onOutput }));
     try {
       await waitForPort(backendPort, 120000);
-      onOutput(`\n✅ Backend live on port ${backendPort}\n`);
+      onOutput(`\n[ready] Backend live on port ${backendPort}\n`);
     } catch {
-      onOutput(`\n⚠ Backend port ${backendPort} not detected — continuing to start the frontend anyway.\n`);
+      onOutput(`\n[warning] Backend port ${backendPort} not detected — continuing to start the frontend anyway.\n`);
     }
     apiUrl = `http://127.0.0.1:${backendPort}`;
   }
@@ -788,18 +788,18 @@ export async function startCompoundNative({ sessionId, repoDir, services, envVar
   const fEnv = { ...baseEnv, PORT: String(frontPort) };
   if (apiUrl) {
     for (const k of API_URL_ENV_KEYS) fEnv[k] = apiUrl;
-    onOutput(`\n🔗 Wiring frontend → backend at ${apiUrl}\n`);
+    onOutput(`\n[info] Wiring frontend → backend at ${apiUrl}\n`);
   }
-  onOutput(`\n🧩 Frontend: ${frontend.runtime.icon} ${frontend.runtime.label} in ./${frontend.workdir || '.'} → port ${frontPort}\n`);
+  onOutput(`\n[info] Frontend: ${frontend.runtime.label} in ./${frontend.workdir || '.'} → port ${frontPort}\n`);
   writeEnvFile(fcwd, envVars, onOutput);
-  onOutput(`\n📦 Installing frontend dependencies...\n`);
+  onOutput(`\n[install] Installing frontend dependencies...\n`);
   try {
     await installDeps({ runtime: frontend.runtime, cwd: fcwd, processEnv: fEnv, runtimes, onOutput });
   } catch (err) {
-    onOutput(`\n⚠ Frontend install warning: ${err.message}\n`);
+    onOutput(`\n[warning] Frontend install warning: ${err.message}\n`);
   }
   const { startCmd, startArgs } = buildStartCommand({ runtime: frontend.runtime, hostPort: frontPort, processEnv: fEnv });
-  onOutput(`\n🚀 Starting frontend...\n`);
+  onOutput(`\n[start] Starting frontend...\n`);
   const observer = createPortObserver();
   processes.push(spawnApp({
     startCmd, startArgs, cwd: fcwd, processEnv: fEnv,
