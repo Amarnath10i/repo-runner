@@ -132,12 +132,13 @@ export default function App() {
   useEffect(() => {
     const term = new Terminal({
       convertEol: true,
+      allowTransparency: true,
       fontFamily: '"JetBrains Mono", "Fira Code", monospace',
       fontSize: 13,
       lineHeight: 1.4,
       theme: {
-        background: '#030508',
-        foreground: '#8b95a8',
+        background: 'rgba(0, 0, 0, 0)',
+        foreground: '#c8d0e0',
         cursor: '#5a7aee',
         cursorAccent: '#030508',
         selectionBackground: 'rgba(90, 122, 238, 0.15)',
@@ -618,8 +619,8 @@ export default function App() {
              <div className="preview-empty full">
                {isBusy && (
                  <div className="building-state">
+                   <div className="loading-calligraphy">This May Take A While</div>
                    <span className="spinner large" />
-                   <div className="building-text">Preparing Sandbox...</div>
                  </div>
                )}
                {stage === STAGES.ERROR && (errorMsg || '').startsWith('docker_offline:') ? (() => {

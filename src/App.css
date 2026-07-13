@@ -866,8 +866,7 @@ body {
 /* ─── Terminal Side Panel (Right) ─── */
 .terminal-side-panel {
   position: relative;
-  background: rgba(5, 5, 5, 0.95);
-  backdrop-filter: blur(24px);
+  background: transparent;
   border-left: 1px solid var(--border-subtle);
   display: flex;
   flex-direction: column;
@@ -893,7 +892,7 @@ body {
   align-items: center;
   justify-content: space-between;
   padding: 0.5rem 1rem;
-  background: rgba(255, 255, 255, 0.02);
+  background: transparent;
   border-bottom: 1px solid var(--border-subtle);
   transition: background var(--transition-fast);
 }
