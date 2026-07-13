@@ -620,7 +620,7 @@ export default function App() {
              <div className="preview-empty full">
                {isBusy && (
                  <div className="building-state">
-                   <div className="loading-calligraphy">This May Take A While</div>
+                   <div className="loading-calligraphy">Live</div>
                    <div className="ios-spinner">
                      {Array.from({ length: 12 }).map((_, i) => (
                        <span key={i} style={{ '--i': i }} />
