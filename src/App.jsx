@@ -567,7 +567,7 @@ export default function App() {
               <input
                 id="repo-url"
                 type="url"
-                placeholder="Paste the URL"
+                placeholder="Enter the URL"
                 value={repoUrl}
                 onChange={(e) => setRepoUrl(e.target.value)}
                 disabled={isBusy}
