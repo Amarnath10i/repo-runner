@@ -281,7 +281,7 @@ body {
 
 .hero-size .brand-live {
   font-size: 5.5rem;
-  margin-left: -3rem;
+  margin-left: -2rem;
   transform: translateY(2.5rem);
   padding-right: 0.5rem; /* Fixes cut-off e in cursive font */
 }
@@ -291,7 +291,7 @@ body {
   font-size: 2.8rem;
   color: rgba(255, 255, 255, 0.35);
   margin-top: 1.5rem;
-  letter-spacing: 0.02em;
+  letter-spacing: 0.12em;
 }
 
 .hero-form {
