@@ -66,7 +66,9 @@ function stepIndex(key) {
 
 export default function App() {
   const [repoUrl, setRepoUrl] = useState('');
-  const [token, setToken] = useState('');
+  // Pre-fill the GitHub token from a local .env (VITE_GITHUB_TOKEN) so it
+  // doesn't have to be entered every time. Still editable in the UI.
+  const [token, setToken] = useState(import.meta.env.VITE_GITHUB_TOKEN || '');
   const [ollamaEndpoint, setOllamaEndpoint] = useState('http://localhost:11434');
   const [ollamaModel, setOllamaModel] = useState('llama3.1');
   const [useOllama, setUseOllama] = useState(false);
