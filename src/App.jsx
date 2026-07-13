@@ -563,11 +563,6 @@ export default function App() {
 
       <main className={`hero-layout ${stage !== STAGES.IDLE ? 'hidden' : ''}`}>
         <div className="hero-content">
-          <h1 className="hero-title">Deploy in Seconds</h1>
-          <p className="hero-subtitle">
-            Experience a frictionless workflow. Provide any GitHub repository URL and watch your code come to life instantly in a secure sandbox environment.
-          </p>
-          
           <form onSubmit={handleFetchRepo} className="hero-form">
             <div className="hero-input-group">
               <input
@@ -585,6 +580,7 @@ export default function App() {
               </button>
             </div>
           </form>
+          <p className="hero-tagline">Experience a frictionless</p>
         </div>
       </main>
 

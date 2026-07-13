@@ -223,22 +223,12 @@ body {
   to { opacity: 1; transform: translateY(0); }
 }
 
-.hero-title {
-  font-size: 4rem;
-  font-weight: 800;
-  letter-spacing: -0.04em;
-  background: linear-gradient(135deg, #ffffff 0%, #a78bfa 100%);
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  margin-bottom: 1rem;
-}
-
-.hero-subtitle {
-  font-size: 1.15rem;
-  color: var(--text-secondary);
-  line-height: 1.6;
-  margin-bottom: 3rem;
-  max-width: 80%;
+.hero-tagline {
+  font-family: 'Great Vibes', cursive;
+  font-size: 1.8rem;
+  color: rgba(255, 255, 255, 0.35);
+  margin-top: 1.5rem;
+  letter-spacing: 0.02em;
 }
 
 .hero-form {
