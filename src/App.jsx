@@ -734,14 +734,17 @@ export default function App() {
           </div>
           {previewUrl ? (
             <iframe
+              // Remount when switching between preview kinds so the correct
+              // `credentialless` state is applied at element creation.
+              key={executionMode === 'webcontainer' ? 'wc' : 'ext'}
               title="preview"
               src={previewUrl}
               className="preview-frame"
-              // `credentialless` lets this cross-origin-isolated page (COOP/COEP,
-              // needed for WebContainers) embed a cross-origin localhost app that
-              // doesn't send COEP itself. Without it the browser blocks the frame.
-              credentialless=""
-              ref={(el) => el && el.setAttribute('credentialless', '')}
+              // `credentialless` lets this cross-origin-isolated page (COOP/COEP)
+              // embed a cross-origin localhost app (native/Docker) that doesn't
+              // send COEP itself. But WebContainer preview URLs need the normal
+              // credentialed context, so only set it for external previews.
+              {...(executionMode === 'webcontainer' ? {} : { credentialless: '' })}
               allow="accelerometer; camera; encrypted-media; geolocation; gyroscope; microphone; clipboard-read; clipboard-write"
             />
           ) : (
