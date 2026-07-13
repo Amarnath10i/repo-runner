@@ -543,6 +543,8 @@ body {
   background-clip: text;
   -webkit-text-fill-color: transparent;
   filter: drop-shadow(0 0 22px rgba(200, 116, 255, 0.45));
+  /* nudge right so the word centers over the loader (offsets the dots slot) */
+  transform: translateX(0.7em);
 }
 
 .loading-calligraphy .dots {
