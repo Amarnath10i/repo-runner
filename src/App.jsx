@@ -5,7 +5,7 @@ import '@xterm/xterm/css/xterm.css';
 import { parseGithubUrl, getDefaultBranch, fetchRepoTree, hydrateAllFiles, detectEnvVars } from './lib/github.js';
 import { runRepo } from './lib/runner.js';
 import { analyzeRepo, checkOllamaAvailable } from './lib/ollama.js';
-import { analyzeTreeLocally } from './lib/heuristics.js';
+import { analyzeTreeLocally, isPromptableSecret } from './lib/heuristics.js';
 import {
   analyzeRepoBackend,
   runRepoBackend,
@@ -323,7 +323,7 @@ export default function App() {
           ...frontendKeys,
           ...(backendAnalysis.envVars || []),
           ...(analysis.envVarsMentioned || []),
-        ]));
+        ])).filter(isPromptableSecret);
 
         // Decide: native or Docker?
         const canNative = backendAnalysis.nativeAvailable;
@@ -366,7 +366,7 @@ export default function App() {
       // ── Handle env vars for WebContainer path ──
       const keys = detectEnvVars(tree);
       const mentionedByLLM = analysis?.envVarsMentioned ?? [];
-      const allKeys = Array.from(new Set([...keys, ...mentionedByLLM]));
+      const allKeys = Array.from(new Set([...keys, ...mentionedByLLM])).filter(isPromptableSecret);
 
       if (allKeys.length > 0) {
         setDetectedKeys(allKeys);

@@ -592,7 +592,7 @@ export function isPromptableSecret(name) {
   if (DB_CONN_RE.test(name)) return true;     // DB connection string → ask
   if (CONFIG_URL_RE.test(name)) return false; // base URL / host / port → auto
   if (SECRET_RE.test(name)) return true;      // API key / token / secret → ask
-  return true;                                // unknown → ask, to be safe
+  return false;                               // everything else (config) → auto
 }
 
 const CODE_EXTS = new Set([

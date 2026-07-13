@@ -166,6 +166,19 @@ export function analyzeTreeLocally(tree) {
  * Return a human-readable reason if a Node project can't run in a browser
  * WebContainer (so it should go to the backend), or null if it's fine.
  */
+// Only prompt the user for real secrets (API keys, tokens, DB URIs). Base URLs,
+// host/port, and other config are auto-wired or left to the app's defaults.
+const _DB_CONN_RE = /(MONGO|DATABASE|POSTGRES|POSTGRESQL|MYSQL|MARIADB|REDIS|MSSQL|SQLALCHEMY|DB)[_A-Z0-9]*(URL|URI|CONNECTION|DSN)|CONNECTION[_-]?STRING/i;
+const _CONFIG_URL_RE = /(_URL|_URI|_ENDPOINT|_HOST|_PORT|BASE[_-]?URL)$|^(NEXT_PUBLIC_|VITE_|REACT_APP_|PUBLIC_)/i;
+const _SECRET_RE = /(KEY|TOKEN|SECRET|PASSWORD|PASSWD|PWD|CREDENTIAL|PRIVATE|AUTH|ACCESS[_-]?KEY|CLIENT[_-]?SECRET|API[_-]?KEY|DSN)/i;
+
+export function isPromptableSecret(name) {
+  if (_DB_CONN_RE.test(name)) return true;
+  if (_CONFIG_URL_RE.test(name)) return false;
+  if (_SECRET_RE.test(name)) return true;
+  return false;
+}
+
 export function webContainerIncompatibleReason(pkg) {
   const deps = { ...(pkg?.dependencies || {}), ...(pkg?.devDependencies || {}) };
   if (deps.next) return 'Next.js uses native/WASM bindings that break in-browser';
