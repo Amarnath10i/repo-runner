@@ -191,7 +191,23 @@ export default function App() {
     };
   }, []);
 
+  const [terminalProgress, setTerminalProgress] = useState(null);
+
   const writeLog = useCallback((text) => {
+    // Parse backend logs to update progress more accurately
+    if (text.includes('[setup]')) {
+      setTerminalProgress({ percent: 20, eta: '~ 20s' });
+    } else if (text.includes('[install]')) {
+      setTerminalProgress({ percent: 40, eta: '~ 30s' });
+    } else if (text.includes('[build]')) {
+      setTerminalProgress({ percent: 60, eta: '~ 15s' });
+    } else if (text.includes('[start]')) {
+      setTerminalProgress({ percent: 80, eta: '~ 5s' });
+    } else if (text.includes('[serve]')) {
+      setTerminalProgress({ percent: 85, eta: '~ 2s' });
+    } else if (text.includes('[ready]')) {
+      setTerminalProgress({ percent: 100, eta: 'Done' });
+    }
     termInstance.current?.write(text.replace(/\n/g, '\r\n'));
   }, []);
 
@@ -502,7 +518,7 @@ export default function App() {
   const isBusy = [STAGES.FETCHING, STAGES.ANALYZING, STAGES.BUILDING, STAGES.RUNNING].includes(stage);
   const currentStep = stageToStep(stage);
   const currentStepIdx = currentStep ? stepIndex(currentStep) : -1;
-  const { progress: progressPct, eta: progressEta } = useSimulatedProgress(stage);
+  const { progress: progressPct, eta: progressEta } = useSimulatedProgress(stage, terminalProgress);
 
   return (
     <div className="app">
@@ -545,15 +561,17 @@ export default function App() {
 
       <main className={`hero-layout ${stage !== STAGES.IDLE ? 'hidden' : ''}`}>
         <div className="hero-content">
-          <h1 className="hero-title">Instant Live Demo</h1>
-          <p className="hero-subtitle">Paste any GitHub repository URL and we'll auto-detect, build, and run it instantly.</p>
+          <h1 className="hero-title">Deploy in Seconds</h1>
+          <p className="hero-subtitle">
+            Experience a frictionless workflow. Provide any GitHub repository URL and watch your code come to life instantly in a secure sandbox environment.
+          </p>
           
           <form onSubmit={handleFetchRepo} className="hero-form">
             <div className="hero-input-group">
               <input
                 id="repo-url"
                 type="url"
-                placeholder="https://github.com/owner/repo"
+                placeholder="https://github.com/owner/repository"
                 value={repoUrl}
                 onChange={(e) => setRepoUrl(e.target.value)}
                 disabled={isBusy}
@@ -561,7 +579,7 @@ export default function App() {
                 className="hero-input"
               />
               <button className="btn-hero-primary" type="submit" disabled={isBusy || !repoUrl}>
-                {isBusy ? <span className="spinner" /> : 'Fetch & Run'}
+                {isBusy ? <span className="spinner" /> : 'Go Live'}
               </button>
             </div>
           </form>
@@ -771,12 +789,12 @@ function getProgressDetails(stage) {
   }
 }
 
-function useSimulatedProgress(stage) {
+function useSimulatedProgress(stage, terminalProgress) {
   const [progress, setProgress] = useState(0);
   const [eta, setEta] = useState('');
 
   useEffect(() => {
-    const details = getProgressDetails(stage);
+    const details = terminalProgress || getProgressDetails(stage);
     setEta(details.eta);
 
     if (stage === STAGES.READY || stage === STAGES.ERROR || stage === STAGES.IDLE) {
@@ -796,7 +814,7 @@ function useSimulatedProgress(stage) {
     }, 100);
 
     return () => clearInterval(interval);
-  }, [stage]);
+  }, [stage, terminalProgress]);
 
   return { progress, eta };
 }
