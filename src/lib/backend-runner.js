@@ -2,8 +2,10 @@
 // Communicates with the backend server via REST + WebSocket for
 // repos that can't run in WebContainers (Python, Go, Rust, etc.)
 
-const BACKEND_URL = 'http://localhost:3001';
-const WS_URL = 'ws://localhost:3001/ws';
+// Configurable for deployment: set VITE_BACKEND_URL to your deployed backend
+// (e.g. a Railway URL). Defaults to the local dev backend.
+const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:3001';
+const WS_URL = `${BACKEND_URL.replace(/^http/, 'ws')}/ws`;
 
 /**
  * Analyze a repo — clone it on the backend and detect its runtime.
