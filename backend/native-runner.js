@@ -4,7 +4,7 @@
 
 import { spawn, execSync } from 'child_process';
 import { join, relative } from 'path';
-import { writeFileSync, existsSync, copyFileSync } from 'fs';
+import { writeFileSync, existsSync, copyFileSync, readdirSync, readFileSync } from 'fs';
 import { createConnection } from 'net';
 import {
   isPythonProvisioned,
@@ -321,10 +321,21 @@ async function installDeps({ runtime, cwd, processEnv, runtimes, onOutput }) {
         await spawnWithOutput(python, ['-m', 'venv', '.venv'], { cwd, env: processEnv }, onOutput);
       }
       const venvPip = isWin ? join('.venv', 'Scripts', 'pip.exe') : join('.venv', 'bin', 'pip');
-      if (existsSync(join(cwd, 'requirements.txt'))) {
-        await spawnWithOutput(venvPip, ['install', '-r', 'requirements.txt'], { cwd, env: processEnv }, onOutput);
+      // Match requirements.txt and common variants/typos (requirments.txt,
+      // requirement.txt, requirements-dev.txt, ...) so deps still install.
+      const reqFile = findRequirementsFile(cwd);
+      if (reqFile) {
+        await spawnWithOutput(venvPip, ['install', '-r', reqFile], { cwd, env: processEnv }, onOutput);
       } else if (existsSync(join(cwd, 'pyproject.toml'))) {
         await spawnWithOutput(venvPip, ['install', '.'], { cwd, env: processEnv }, onOutput);
+      } else {
+        // No manifest — install the third-party packages the code imports so
+        // scripts (e.g. ML pipelines) don't die on ModuleNotFoundError.
+        const pkgs = inferPipPackages(cwd);
+        if (pkgs.length) {
+          onOutput(`\n📦 No requirements file — installing inferred packages: ${pkgs.join(', ')}\n`);
+          await spawnWithOutput(venvPip, ['install', ...pkgs], { cwd, env: processEnv }, onOutput);
+        }
       }
       if (runtime.id === 'python-fastapi') {
         await spawnWithOutput(venvPip, ['install', 'uvicorn'], { cwd, env: processEnv }, onOutput);
@@ -420,6 +431,81 @@ function spawnApp({ startCmd, startArgs, cwd, processEnv, onOutput }) {
   proc.stderr.on('data', (data) => onOutput(data.toString()));
   proc.on('error', (err) => onOutput(`\n❌ Process error: ${err.message}\n`));
   return proc;
+}
+
+/**
+ * Find a requirements file, tolerating common misspellings/variants
+ * (requirments.txt, requirement.txt, requirements-dev.txt, ...). Prefers the
+ * correctly-spelled name when present.
+ */
+function findRequirementsFile(cwd) {
+  try {
+    const files = readdirSync(cwd);
+    const exact = files.find((f) => f.toLowerCase() === 'requirements.txt');
+    if (exact) return exact;
+    // Fuzzy: anything that starts like "requir…" and ends in .txt.
+    return files.find((f) => /^requir\w*\.txt$/i.test(f)) || null;
+  } catch {
+    return null;
+  }
+}
+
+// Map Python import names to their pip package names when they differ.
+const IMPORT_TO_PIP = {
+  cv2: 'opencv-python', PIL: 'pillow', sklearn: 'scikit-learn', skimage: 'scikit-image',
+  bs4: 'beautifulsoup4', yaml: 'pyyaml', dotenv: 'python-dotenv', Crypto: 'pycryptodome',
+  serial: 'pyserial', dateutil: 'python-dateutil', jwt: 'PyJWT', OpenGL: 'PyOpenGL',
+};
+
+const PY_STDLIB = new Set([
+  'os', 'sys', 'json', 're', 'math', 'random', 'datetime', 'collections', 'itertools',
+  'functools', 'pathlib', 'typing', 'subprocess', 'threading', 'multiprocessing', 'time',
+  'logging', 'argparse', 'csv', 'io', 'glob', 'shutil', 'socket', 'http', 'urllib',
+  'unittest', 'abc', 'enum', 'dataclasses', 'asyncio', 'warnings', 'copy', 'pickle',
+  'hashlib', 'base64', 'string', 'traceback', 'contextlib', 'operator', 'tempfile',
+  'uuid', 'decimal', 'statistics', 'queue', 'signal', 'platform', 'inspect', 'importlib',
+  'ast', 'types', 'textwrap', 'struct', 'array', 'bisect', 'heapq', 'weakref', 'gc',
+  'ctypes', 'sqlite3', 'xml', 'html', 'email', 'ssl', 'select', 'fnmatch', '__future__',
+  'concurrent', 'secrets', 'getpass', 'zipfile', 'tarfile', 'binascii', 'codecs',
+]);
+
+/**
+ * Best-effort: infer third-party pip packages a repo needs by scanning its
+ * Python imports, so scripts with no requirements file (e.g. ML pipelines)
+ * still get their dependencies. Excludes stdlib and the repo's own modules.
+ */
+function inferPipPackages(cwd) {
+  const localNames = new Set();
+  try {
+    for (const f of readdirSync(cwd, { withFileTypes: true })) {
+      if (f.isDirectory()) localNames.add(f.name);
+      else if (f.name.endsWith('.py')) localNames.add(f.name.slice(0, -3));
+    }
+  } catch {
+    // ignore
+  }
+
+  const files = collectSources(cwd, new Set(['.py'])).slice(0, 100);
+  const mods = new Set();
+  const re = /^\s*(?:from\s+([a-zA-Z_]\w*)|import\s+([a-zA-Z_]\w*))/gm;
+  for (const rel of files) {
+    let content;
+    try {
+      content = readFileSync(join(cwd, rel), 'utf8');
+    } catch {
+      continue;
+    }
+    let m;
+    re.lastIndex = 0;
+    while ((m = re.exec(content))) {
+      const mod = m[1] || m[2];
+      if (mod && !PY_STDLIB.has(mod) && !localNames.has(mod)) mods.add(mod);
+    }
+  }
+
+  const pkgs = new Set();
+  for (const mod of mods) pkgs.add(IMPORT_TO_PIP[mod] || mod);
+  return [...pkgs].filter(Boolean);
 }
 
 /** Write user-provided env vars to a .env file in `cwd` (if any). */
