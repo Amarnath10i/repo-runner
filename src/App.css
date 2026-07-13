@@ -322,12 +322,12 @@ body {
 
 .hero-input {
   flex: 1;
-  background: transparent;
+  background-color: transparent !important;
   border: none;
   padding: 1.5rem 2rem;
   font-family: 'Caveat', cursive;
   font-size: 1.6rem;
-  color: rgba(255, 255, 255, 0.9);
+  color: #ffffff !important;
   font-weight: 600;
   letter-spacing: 0.08em;
   outline: none;
@@ -338,9 +338,8 @@ body {
 .hero-input:-webkit-autofill:hover, 
 .hero-input:-webkit-autofill:focus, 
 .hero-input:-webkit-autofill:active {
-  -webkit-box-shadow: 0 0 0 30px transparent inset !important;
-  -webkit-text-fill-color: rgba(255, 255, 255, 0.9) !important;
-  transition: background-color 5000s ease-in-out 0s;
+  transition: background-color 5000s ease-in-out 0s, color 5000s ease-in-out 0s;
+  -webkit-text-fill-color: #ffffff !important;
 }
 
 .hero-input::placeholder {
