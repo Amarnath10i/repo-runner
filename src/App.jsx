@@ -608,35 +608,8 @@ export default function App() {
           {/* Loading Overlay (Horizontal Pipeline) */}
           {stage !== STAGES.READY && stage !== STAGES.IDLE && (
             <div className="loading-overlay">
-              <div className="workspace-status-bar">
-                <div className="workspace-status-content">
-                  <div className="status-line compact">
-                    <StatusDot stage={stage} />
-                    <span>{statusLabel(stage)}</span>
-                    {isBusy && progressEta && <span className="eta-text">ETA: {progressEta}</span>}
-                  </div>
-                  
-                  {runtimeInfo && (
-                    <div className="runtime-badge compact" style={{ color: runtimeInfo.color, borderColor: runtimeInfo.color + '22', background: runtimeInfo.color + '08' }}>
-                      {runtimeInfo.label}
-                      {executionMode && (
-                        <span style={{ opacity: 0.5, fontSize: '0.6rem', marginLeft: '0.15rem' }}>
-                          via {executionMode === 'webcontainer' ? 'WebContainer' : executionMode === 'native' ? 'Native' : 'Docker'}
-                        </span>
-                      )}
-                    </div>
-                  )}
-                </div>
-                
-                {/* Integrated Progress Bar */}
-                {(isBusy || stage === STAGES.NEEDS_ENV) && (
-                  <div className="status-progress-track">
-                    <div 
-                      className={`status-progress-fill ${stage === STAGES.READY ? 'done' : ''}`} 
-                      style={{ width: `${progressPct}%` }} 
-                    />
-                  </div>
-                )}
+              <div className="loading-calligraphy">
+                This May Take A While
               </div>
             </div>
           )}

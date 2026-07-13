@@ -513,9 +513,20 @@ body {
   align-items: center;
   justify-content: center;
   gap: 2rem;
-  background: var(--bg-deep);
+  background: rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(24px);
+  -webkit-backdrop-filter: blur(24px);
   z-index: 50;
   animation: fade-in var(--transition-smooth);
+}
+
+.loading-calligraphy {
+  font-family: 'Great Vibes', cursive;
+  font-size: 4rem;
+  background: linear-gradient(90deg, #cc1a1a, #8a1a5c, #3a1a8a);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: float-liquid 4s ease-in-out infinite alternate;
 }
 
 .horizontal-stepper {
