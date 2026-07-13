@@ -28,25 +28,25 @@ const STAGES = {
 };
 
 const PIPELINE_STEPS = [
-  { key: 'fetch', label: 'Fetch', icon: '📥' },
-  { key: 'analyze', label: 'Detect', icon: '🔍' },
-  { key: 'build', label: 'Build', icon: '🔨' },
-  { key: 'run', label: 'Run', icon: '▶' },
-  { key: 'live', label: 'Live', icon: '🟢' },
+  { key: 'fetch', label: 'Fetch' },
+  { key: 'analyze', label: 'Detect' },
+  { key: 'build', label: 'Build' },
+  { key: 'run', label: 'Run' },
+  { key: 'live', label: 'Live' },
 ];
 
 const SUPPORTED_RUNTIMES = [
-  { icon: '⬢', label: 'Node.js', color: '#68a063' },
-  { icon: '🐍', label: 'Python', color: '#3776ab' },
-  { icon: '🎈', label: 'Streamlit', color: '#ff4b4b' },
-  { icon: '⚡', label: 'FastAPI', color: '#009688' },
-  { icon: '🔵', label: 'Go', color: '#00add8' },
-  { icon: '🦀', label: 'Rust', color: '#dea584' },
-  { icon: '💎', label: 'Ruby', color: '#cc342d' },
-  { icon: '🐘', label: 'PHP', color: '#777bb4' },
-  { icon: '☕', label: 'Java', color: '#f89820' },
-  { icon: '🟣', label: '.NET', color: '#512bd4' },
-  { icon: '🐳', label: 'Docker', color: '#2496ed' },
+  { label: 'Node.js', color: '#68a063' },
+  { label: 'Python', color: '#3776ab' },
+  { label: 'Streamlit', color: '#ff4b4b' },
+  { label: 'FastAPI', color: '#009688' },
+  { label: 'Go', color: '#00add8' },
+  { label: 'Rust', color: '#dea584' },
+  { label: 'Ruby', color: '#cc342d' },
+  { label: 'PHP', color: '#777bb4' },
+  { label: 'Java', color: '#f89820' },
+  { label: '.NET', color: '#512bd4' },
+  { label: 'Docker', color: '#2496ed' },
 ];
 
 function stageToStep(stage) {
@@ -135,27 +135,27 @@ export default function App() {
       fontSize: 13,
       lineHeight: 1.4,
       theme: {
-        background: '#0a0c14',
-        foreground: '#c8cfe0',
-        cursor: '#6c8cff',
-        cursorAccent: '#0a0c14',
-        selectionBackground: 'rgba(108, 140, 255, 0.25)',
-        black: '#1a1e2e',
-        brightBlack: '#3a3f54',
-        red: '#f87171',
-        brightRed: '#fca5a5',
-        green: '#34d399',
-        brightGreen: '#6ee7b7',
-        yellow: '#fbbf24',
-        brightYellow: '#fcd34d',
-        blue: '#6c8cff',
-        brightBlue: '#93b4ff',
-        magenta: '#a78bfa',
-        brightMagenta: '#c4b5fd',
-        cyan: '#22d3ee',
-        brightCyan: '#67e8f9',
-        white: '#e8ecf4',
-        brightWhite: '#ffffff',
+        background: '#030508',
+        foreground: '#8b95a8',
+        cursor: '#5a7aee',
+        cursorAccent: '#030508',
+        selectionBackground: 'rgba(90, 122, 238, 0.15)',
+        black: '#0e1218',
+        brightBlack: '#2a3040',
+        red: '#c04848',
+        brightRed: '#e05252',
+        green: '#2bb87a',
+        brightGreen: '#4cc98e',
+        yellow: '#c89520',
+        brightYellow: '#d4a020',
+        blue: '#5a7aee',
+        brightBlue: '#7a96f0',
+        magenta: '#8b72e0',
+        brightMagenta: '#a68ef0',
+        cyan: '#1ab8d4',
+        brightCyan: '#40c8e0',
+        white: '#a0a8b8',
+        brightWhite: '#c8cdd8',
       },
     });
     const fit = new FitAddon();
@@ -251,7 +251,6 @@ export default function App() {
         setRuntimeInfo({
           id: 'node',
           label: 'Node.js',
-          icon: '⬢',
           color: '#68a063',
         });
         writeLog(`\n\x1b[1;32m✓ This is a Node.js project — running in-browser via WebContainers\x1b[0m\n`);
@@ -275,7 +274,7 @@ export default function App() {
         const backendAnalysis = await analyzeRepoBackend({ repoUrl, token });
         sessionRef.current = backendAnalysis.sessionId;
         setRuntimeInfo(backendAnalysis.runtime);
-        writeLog(`\x1b[1;32m✓ Detected: ${backendAnalysis.runtime.icon} ${backendAnalysis.runtime.label}\x1b[0m\n`);
+        writeLog(`\x1b[1;32m✓ Detected: ${backendAnalysis.runtime.label}\x1b[0m\n`);
 
         // Check for env vars
         const frontendKeys = detectEnvVars(tree);
@@ -490,10 +489,10 @@ export default function App() {
     <div className="app">
       <header className="topbar">
         <div className="brand">
-          <div className="brand-mark">⌁</div>
+          <div className="brand-mark">R</div>
           <span className="brand-name">Repo Runner</span>
         </div>
-        <span className="brand-tag">paste a GitHub URL → instant live demo</span>
+        <span className="brand-tag">paste a GitHub URL — instant live demo</span>
 
         <div className="topbar-right">
           <div className={`backend-badge ${dockerOnline ? 'online' : serverOnline ? 'warning' : 'offline'}`}>
@@ -526,7 +525,7 @@ export default function App() {
                     />
                   )}
                   <span className={`pipeline-stage ${cls}`}>
-                    <span className="stage-icon">{step.icon}</span>
+                    <span className="stage-dot" />
                     {step.label}
                   </span>
                 </span>
@@ -540,14 +539,13 @@ export default function App() {
               className="runtime-badge"
               style={{
                 color: runtimeInfo.color,
-                borderColor: runtimeInfo.color + '44',
-                background: runtimeInfo.color + '12',
+                borderColor: runtimeInfo.color + '22',
+                background: runtimeInfo.color + '08',
               }}
             >
-              <span>{runtimeInfo.icon}</span>
               {runtimeInfo.label}
               {executionMode && (
-                <span style={{ opacity: 0.6, fontSize: '0.65rem', marginLeft: '0.25rem' }}>
+                <span style={{ opacity: 0.5, fontSize: '0.6rem', marginLeft: '0.15rem' }}>
                   via {executionMode === 'webcontainer' ? 'WebContainer' : executionMode === 'native' ? 'Native' : 'Docker'}
                 </span>
               )}
@@ -599,7 +597,7 @@ export default function App() {
           {/* Env vars form */}
           {stage === STAGES.NEEDS_ENV && (
             <div className="env-form">
-              <h3>🔑 Environment Variables Required</h3>
+              <h3>Environment Variables Required</h3>
               <p className="hint">
                 Detected from .env.example. Values stay in memory only — never sent to external
                 servers.
@@ -630,7 +628,7 @@ export default function App() {
             const isUnknown = !runtimeName || /^unknown$/i.test(runtimeName);
             return (
               <div className="docker-banner">
-                <div className="docker-banner-icon">🐳</div>
+                <div className="docker-banner-icon">D</div>
                 <div className="docker-banner-content">
                   {isUnknown ? (
                     <>
@@ -672,7 +670,7 @@ export default function App() {
               </div>
             );
           })() : stage === STAGES.ERROR ? (
-            <div className="error-box">❌ {errorMsg}</div>
+            <div className="error-box">{errorMsg}</div>
           ) : null}
 
           {/* How it works — idle state */}
@@ -689,7 +687,7 @@ export default function App() {
               </div>
               <div className="how-step">
                 <span className="how-step-num">3</span>
-                <span>Node.js runs in-browser. Python, Go, Rust, etc. run in Docker</span>
+                <span>Node.js runs in-browser. Python, Go, Rust, etc. run natively</span>
               </div>
               <div className="how-step">
                 <span className="how-step-num">4</span>
@@ -698,7 +696,8 @@ export default function App() {
               <div className="runtimes-grid">
                 {SUPPORTED_RUNTIMES.map((r) => (
                   <span key={r.label} className="runtime-chip">
-                    {r.icon} {r.label}
+                    <span className="runtime-dot" style={{ background: r.color }} />
+                    {r.label}
                   </span>
                 ))}
               </div>
@@ -715,7 +714,11 @@ export default function App() {
         {/* ── Terminal Pane ── */}
         <section className="output-pane">
           <div className="pane-header">
-            <span className="pane-header-icon">⌨</span>
+            <div className="window-dots">
+              <span className="window-dot red" />
+              <span className="window-dot yellow" />
+              <span className="window-dot green" />
+            </div>
             Terminal
           </div>
           <div className="terminal-wrap" ref={termRef} />
@@ -724,12 +727,22 @@ export default function App() {
         {/* ── Preview Pane ── */}
         <section className={`preview-pane${previewUrl ? ' live' : ''}`}>
           <div className="pane-header">
-            <span className="pane-header-icon">👁</span>
-            Live Preview
+            <div className="window-dots">
+              <span className="window-dot red" />
+              <span className="window-dot yellow" />
+              <span className="window-dot green" />
+            </div>
+            Preview
             {previewUrl && (
-              <a className="url-chip" href={previewUrl} target="_blank" rel="noreferrer">
-                {previewUrl} ↗
-              </a>
+              <>
+                <span className="live-indicator">
+                  <span className="live-dot" />
+                  Live
+                </span>
+                <a className="url-chip" href={previewUrl} target="_blank" rel="noreferrer">
+                  {previewUrl}
+                </a>
+              </>
             )}
           </div>
           {previewUrl ? (
@@ -749,7 +762,6 @@ export default function App() {
             />
           ) : (
             <div className="preview-empty">
-              <div className="preview-empty-icon">🌐</div>
               <div className="preview-empty-text">
                 The live preview will appear here once your app starts running.
               </div>
@@ -757,6 +769,14 @@ export default function App() {
           )}
         </section>
       </main>
+
+      <footer className="app-footer">
+        <span>Repo Runner</span>
+        <span className="footer-sep">·</span>
+        <a className="footer-link" href="https://github.com/Amarnath10i/repo-runner" target="_blank" rel="noreferrer">
+          GitHub
+        </a>
+      </footer>
     </div>
   );
 }
@@ -767,7 +787,7 @@ function statusLabel(stage) {
     case STAGES.FETCHING: return 'Cloning repository from GitHub…';
     case STAGES.ANALYZING: return 'Detecting runtime & dependencies…';
     case STAGES.NEEDS_ENV: return 'Waiting for environment variables';
-    case STAGES.BUILDING: return 'Building Docker sandbox…';
+    case STAGES.BUILDING: return 'Building sandbox…';
     case STAGES.RUNNING: return 'Installing dependencies & starting…';
     case STAGES.READY: return 'App is running';
     case STAGES.ERROR: return 'Something went wrong';
