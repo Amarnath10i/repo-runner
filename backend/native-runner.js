@@ -4,7 +4,7 @@
 
 import { spawn, execSync } from 'child_process';
 import { join, relative } from 'path';
-import { writeFileSync, existsSync } from 'fs';
+import { writeFileSync, existsSync, copyFileSync } from 'fs';
 import { createConnection } from 'net';
 import {
   isPythonProvisioned,
@@ -166,6 +166,7 @@ export function canRunNatively(runtimeId) {
     'dotnet': runtimes.dotnet,
     'node': runtimes.node,
     'cpp': runtimes.cpp,
+    'static': canRunPython, // served via Python's http.server
   };
   return runtimeMap[runtimeId] ?? false;
 }
@@ -512,6 +513,59 @@ async function startConsoleApp({ sessionId, repoDir, runtime, cwd, envVars, runt
 }
 
 /**
+ * Serve a plain static website (HTML/CSS/JS, no build step) over HTTP using
+ * Python's built-in server. If the landing page isn't index.html (e.g.
+ * home.html), copy it to index.html so it loads at "/".
+ */
+async function startStaticSite({ sessionId, repoDir, runtime, cwd, runtimes, onOutput }) {
+  const hostPort = getAvailablePort();
+
+  // Ensure Python is available (auto-provision on Windows if needed).
+  if (!runtimes.python) {
+    await provisionPython(onOutput);
+    clearRuntimeCache();
+    Object.assign(runtimes, checkNativeRuntimes());
+  }
+  const python = runtimes.pythonCmd || 'python';
+
+  const entry = runtime.entry || 'index.html';
+  if (entry !== 'index.html' && !existsSync(join(cwd, 'index.html'))) {
+    try {
+      copyFileSync(join(cwd, entry), join(cwd, 'index.html'));
+      onOutput(`\n📄 Using ${entry} as the home page (served at /).\n`);
+    } catch {
+      // If the copy fails, the site is still reachable at /<entry>.
+    }
+  }
+
+  onOutput(`\n🌐 Serving static site on port ${hostPort}...\n`);
+  const proc = spawnApp({
+    startCmd: python,
+    startArgs: ['-m', 'http.server', String(hostPort), '--bind', '0.0.0.0'],
+    cwd,
+    processEnv: { ...process.env, PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8' },
+    onOutput,
+  });
+
+  const cleanupTimer = setTimeout(() => {
+    stopNativeProcess(sessionId, (msg) => console.log(`[auto-cleanup] ${msg}`));
+  }, SESSION_TIMEOUT_MS);
+
+  const session = {
+    processes: [proc], hostPort, ports: [hostPort], runtime, repoDir, cleanupTimer, mode: 'native-static',
+  };
+  nativeSessions.set(sessionId, session);
+
+  try {
+    await waitForPort(hostPort, 30000);
+    onOutput(`\n✅ Static site is live on port ${hostPort}!\n`);
+  } catch {
+    onOutput(`\n⚠ Port ${hostPort} not detected — the server may still be starting.\n`);
+  }
+  return { hostPort };
+}
+
+/**
  * Start a native process for a repo (no Docker needed).
  */
 export async function startNativeProcess({ sessionId, repoDir, runtime, envVars, onOutput }) {
@@ -526,6 +580,11 @@ export async function startNativeProcess({ sessionId, repoDir, runtime, envVars,
   // Console programs (C/C++) have no web server — compile & run to the terminal.
   if (runtime.console) {
     return startConsoleApp({ sessionId, repoDir, runtime, cwd, envVars, runtimes, onOutput });
+  }
+
+  // Plain static website — serve the files over HTTP.
+  if (runtime.static) {
+    return startStaticSite({ sessionId, repoDir, runtime, cwd, runtimes, onOutput });
   }
 
   const hostPort = getAvailablePort();

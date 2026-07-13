@@ -319,6 +319,35 @@ const RUNTIME_CONFIGS = [
       return { install: null, start: null, dockerfile: null, console: true };
     },
   },
+  {
+    // Kept last: a plain static website (HTML/CSS/JS, no build step). Only
+    // matches when nothing else did, so real apps aren't misread as static.
+    id: 'static',
+    label: 'Static Site',
+    icon: '🌐',
+    color: '#e34f26',
+    detect: (dir) => {
+      if (existsSync(join(dir, 'index.html'))) return true;
+      try {
+        return readdirSync(dir).some((f) => f.toLowerCase().endsWith('.html'));
+      } catch {
+        return false;
+      }
+    },
+    getCommands: (dir) => {
+      let entry = 'index.html';
+      if (!existsSync(join(dir, 'index.html'))) {
+        try {
+          const html = readdirSync(dir).filter((f) => f.toLowerCase().endsWith('.html'));
+          // Prefer a conventional landing page name if present.
+          entry = html.find((f) => /^(home|index|main)\.html$/i.test(f)) || html[0] || 'index.html';
+        } catch {
+          // keep default
+        }
+      }
+      return { install: null, start: null, dockerfile: null, static: true, entry };
+    },
+  },
 ];
 
 // Docker-based runtimes need a Docker daemon; everything else can run natively.
@@ -615,6 +644,7 @@ export function getDockerImage(runtimeId) {
     'java-maven': 'maven:3.9-eclipse-temurin-21',
     'java-gradle': 'gradle:8-jdk21',
     'cpp': 'gcc:latest',
+    'static': 'python:3.11-slim',
     'dotnet': 'mcr.microsoft.com/dotnet/sdk:8.0',
   };
   return images[runtimeId] || 'ubuntu:22.04';
