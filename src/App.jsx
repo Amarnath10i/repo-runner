@@ -525,7 +525,7 @@ export default function App() {
   const isBusy = [STAGES.FETCHING, STAGES.ANALYZING, STAGES.BUILDING, STAGES.RUNNING].includes(stage);
   const currentStep = stageToStep(stage);
   const currentStepIdx = currentStep ? stepIndex(currentStep) : -1;
-  const { progress: progressPct, eta: progressEta } = useSimulatedProgress(stage, terminalProgress);
+  const { progress: progressPct, remainingSec } = useSimulatedProgress(stage, terminalProgress);
 
   return (
     <div className="app">
@@ -630,7 +630,7 @@ export default function App() {
                      <div className="progress-fill" style={{ width: `${progressPct}%` }} />
                    </div>
                    <div className="progress-label">
-                     {progressPct}%{progressEta ? ` · ${progressEta}` : ''}
+                     {formatRemaining(remainingSec)}
                    </div>
                  </div>
                )}
@@ -680,13 +680,13 @@ export default function App() {
               <div className="env-form modal-content">
                 {detectedKeys.map((key) => (
                   <div className="env-row" key={key}>
-                    <label htmlFor={`env-${key}`}>{key}</label>
+                    <label htmlFor={`env-${key}`}>{key.replace(/_/g, ' ')}</label>
                     <input
                       id={`env-${key}`}
                       type="password"
                       value={envValues[key] || ''}
                       onChange={(e) => setEnvValues((prev) => ({ ...prev, [key]: e.target.value }))}
-                      placeholder={`Enter ${key}…`}
+                      placeholder={`Enter ${key.replace(/_/g, ' ')}…`}
                     />
                   </div>
                 ))}
@@ -737,6 +737,17 @@ export default function App() {
   );
 }
 
+function formatRemaining(sec) {
+  if (sec == null) return 'Estimating time…';
+  if (sec <= 3) return 'Almost done…';
+  if (sec >= 60) {
+    const m = Math.round(sec / 60);
+    return `About ${m} minute${m > 1 ? 's' : ''} remaining`;
+  }
+  const s = Math.max(5, Math.round(sec / 5) * 5);
+  return `About ${s} seconds remaining`;
+}
+
 function statusLabel(stage) {
   switch (stage) {
     case STAGES.IDLE: return 'Ready — paste a repo URL to begin';
@@ -779,30 +790,52 @@ function getProgressDetails(stage) {
 
 function useSimulatedProgress(stage, terminalProgress) {
   const [progress, setProgress] = useState(0);
-  const [eta, setEta] = useState('');
+  const [remainingSec, setRemainingSec] = useState(null);
+  const startRef = useRef(null);
+  const progressRef = useRef(0);
+  const prevStageRef = useRef(STAGES.IDLE);
 
   useEffect(() => {
+    // Start the clock fresh at the beginning of each run.
+    if (stage === STAGES.FETCHING && prevStageRef.current !== STAGES.FETCHING) {
+      startRef.current = Date.now();
+      setRemainingSec(null);
+    }
+    if (stage === STAGES.IDLE) {
+      startRef.current = null;
+      setRemainingSec(null);
+    }
+    prevStageRef.current = stage;
+
     const details = terminalProgress || getProgressDetails(stage);
-    setEta(details.eta);
 
     if (stage === STAGES.READY || stage === STAGES.ERROR || stage === STAGES.IDLE) {
       setProgress(details.percent);
+      progressRef.current = details.percent;
+      if (stage === STAGES.READY) setRemainingSec(0);
       return;
     }
 
     const target = details.percent;
-    const interval = setInterval(() => {
+    const bar = setInterval(() => {
       setProgress(p => {
         const diff = target - p;
-        if (diff > 0.1) {
-          return p + Math.max(0.1, diff * 0.05);
-        }
-        return p;
+        const np = diff > 0.1 ? p + Math.max(0.1, diff * 0.05) : p;
+        progressRef.current = np;
+        return np;
       });
-    }, 100);
+    }, 120);
 
-    return () => clearInterval(interval);
+    // Extrapolate remaining time from elapsed time and progress so far.
+    const eta = setInterval(() => {
+      if (!startRef.current) return;
+      const elapsed = (Date.now() - startRef.current) / 1000;
+      const cur = progressRef.current;
+      if (cur > 2) setRemainingSec(Math.max(0, (elapsed * (100 - cur)) / cur));
+    }, 1000);
+
+    return () => { clearInterval(bar); clearInterval(eta); };
   }, [stage, terminalProgress]);
 
-  return { progress, eta };
+  return { progress, remainingSec };
 }

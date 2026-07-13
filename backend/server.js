@@ -185,7 +185,7 @@ app.post('/api/run', async (req, res) => {
       },
     });
 
-    const previewUrl = `http://localhost:${hostPort}`;
+    const previewUrl = `http://127.0.0.1:${hostPort}`;
 
     broadcast(sessionId, {
       type: 'stage',
@@ -279,7 +279,7 @@ app.post('/api/run-native', async (req, res) => {
       return;
     }
 
-    const previewUrl = `http://localhost:${hostPort}`;
+    const previewUrl = `http://127.0.0.1:${hostPort}`;
 
     broadcast(sessionId, {
       type: 'stage',
@@ -375,7 +375,7 @@ app.get('/api/status/:sessionId', (req, res) => {
     port: session.hostPort,
     runtime: session.runtime.label,
     mode: nativeSession ? 'native' : 'docker',
-    previewUrl: `http://localhost:${session.hostPort}`,
+    previewUrl: `http://127.0.0.1:${session.hostPort}`,
   });
 });
 
@@ -393,7 +393,7 @@ app.all('/preview/:sessionId/*', (req, res) => {
   req.url = req.url.replace(`/preview/${req.params.sessionId}`, '') || '/';
 
   proxy.web(req, res, {
-    target: `http://localhost:${session.hostPort}`,
+    target: `http://127.0.0.1:${session.hostPort}`,
     changeOrigin: true,
   });
 });
@@ -405,7 +405,7 @@ app.all('/preview/:sessionId', (req, res) => {
     return res.status(404).send('Session not found.');
   }
   proxy.web(req, res, {
-    target: `http://localhost:${session.hostPort}`,
+    target: `http://127.0.0.1:${session.hostPort}`,
     changeOrigin: true,
   });
 });
