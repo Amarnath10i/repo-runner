@@ -621,7 +621,17 @@ export default function App() {
                {isBusy && (
                  <div className="building-state">
                    <div className="loading-calligraphy">This May Take A While</div>
-                   <span className="spinner large" />
+                   <div className="ios-spinner">
+                     {Array.from({ length: 12 }).map((_, i) => (
+                       <span key={i} style={{ '--i': i }} />
+                     ))}
+                   </div>
+                   <div className="progress-track">
+                     <div className="progress-fill" style={{ width: `${progressPct}%` }} />
+                   </div>
+                   <div className="progress-label">
+                     {progressPct}%{progressEta ? ` · ${progressEta}` : ''}
+                   </div>
                  </div>
                )}
                {stage === STAGES.ERROR && (errorMsg || '').startsWith('docker_offline:') ? (() => {

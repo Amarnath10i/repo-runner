@@ -1058,13 +1058,60 @@ body {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 1rem;
+  gap: 1.1rem;
 }
 
 .spinner.large {
   width: 48px;
   height: 48px;
   border-width: 4px;
+}
+
+/* iOS/macOS-style 12-segment spinner */
+.ios-spinner {
+  position: relative;
+  width: 52px;
+  height: 52px;
+}
+.ios-spinner span {
+  position: absolute;
+  top: 3px;
+  left: 50%;
+  width: 4px;
+  height: 13px;
+  margin-left: -2px;
+  background: #fff;
+  border-radius: 2px;
+  transform-origin: 2px 23px;
+  transform: rotate(calc(var(--i) * 30deg));
+  opacity: 0.12;
+  animation: ios-fade 1s linear infinite;
+  animation-delay: calc(var(--i) * -0.0833s);
+}
+@keyframes ios-fade {
+  0% { opacity: 1; }
+  100% { opacity: 0.12; }
+}
+
+/* Progress bar */
+.progress-track {
+  width: min(360px, 65%);
+  height: 8px;
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 999px;
+  overflow: hidden;
+}
+.progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #ff5c8a, #c874ff, #6b9bff);
+  border-radius: 999px;
+  transition: width 0.5s ease;
+}
+.progress-label {
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.03em;
 }
 
 .building-text {
