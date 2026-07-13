@@ -156,6 +156,7 @@ export function canRunNatively(runtimeId) {
     'python-fastapi': canRunPython,
     'python-django': canRunPython,
     'python-streamlit': canRunPython,
+    'python-gradio': canRunPython,
     'go': runtimes.go,
     'rust': runtimes.rust,
     'ruby': runtimes.ruby,
@@ -306,7 +307,8 @@ async function installDeps({ runtime, cwd, processEnv, runtimes, onOutput }) {
     case 'python-flask':
     case 'python-fastapi':
     case 'python-django':
-    case 'python-streamlit': {
+    case 'python-streamlit':
+    case 'python-gradio': {
       if (!runtimes.python) {
         await provisionPython(onOutput);
         clearRuntimeCache();
@@ -328,6 +330,9 @@ async function installDeps({ runtime, cwd, processEnv, runtimes, onOutput }) {
       }
       if (runtime.id === 'python-streamlit') {
         await spawnWithOutput(venvPip, ['install', 'streamlit'], { cwd, env: processEnv }, onOutput);
+      }
+      if (runtime.id === 'python-gradio') {
+        await spawnWithOutput(venvPip, ['install', 'gradio'], { cwd, env: processEnv }, onOutput);
       }
       break;
     }
@@ -376,6 +381,14 @@ function buildStartCommand({ runtime, hostPort, processEnv }) {
       const venvStreamlit = isWin ? join('.venv', 'Scripts', 'streamlit.exe') : join('.venv', 'bin', 'streamlit');
       const appFile = runtime.start?.match(/streamlit\s+run\s+(\S+)/)?.[1] || 'app.py';
       return { startCmd: venvStreamlit, startArgs: ['run', appFile, '--server.port', String(hostPort), '--server.headless', 'true', '--server.address', '0.0.0.0'] };
+    }
+
+    case 'python-gradio': {
+      // Gradio reads these env vars, so `demo.launch()` binds our port/host.
+      processEnv.GRADIO_SERVER_PORT = String(hostPort);
+      processEnv.GRADIO_SERVER_NAME = '0.0.0.0';
+      const appFile = runtime.start?.split(' ').pop() || 'app.py';
+      return { startCmd: venvPython, startArgs: [appFile] };
     }
     case 'python':
       return { startCmd: venvPython, startArgs: [runtime.start?.split(' ').pop() || 'main.py'] };

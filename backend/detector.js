@@ -93,6 +93,26 @@ const RUNTIME_CONFIGS = [
     },
   },
   {
+    id: 'python-gradio',
+    label: 'Gradio',
+    icon: '🤗',
+    color: '#ff7c00',
+    detect: (dir) => {
+      const req = readFileSafe(join(dir, 'requirements.txt'));
+      if (req?.toLowerCase().includes('gradio')) return true;
+      const pyproject = readFileSafe(join(dir, 'pyproject.toml'));
+      return pyproject?.toLowerCase().includes('gradio') || false;
+    },
+    getCommands: (dir) => {
+      const appFile = findPythonEntry(dir, ['app.py', 'main.py', 'demo.py', 'run.py', 'gradio_app.py']);
+      return {
+        install: 'pip install -r requirements.txt',
+        start: `python ${appFile}`,
+        dockerfile: null,
+      };
+    },
+  },
+  {
     id: 'python-flask',
     label: 'Flask',
     icon: '🐍',
@@ -587,6 +607,7 @@ export function getDockerImage(runtimeId) {
     'python-fastapi': 'python:3.11-slim',
     'python-django': 'python:3.11-slim',
     'python-streamlit': 'python:3.11-slim',
+    'python-gradio': 'python:3.11-slim',
     'go': 'golang:1.22-alpine',
     'rust': 'rust:1-slim',
     'ruby': 'ruby:3.3-slim',
