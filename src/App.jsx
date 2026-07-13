@@ -662,6 +662,32 @@ export default function App() {
                 )}
              </div>
            )}
+
+          {/* Environment Variables Modal — over the preview area, terminal stays visible */}
+          {stage === STAGES.NEEDS_ENV && (
+            <div className="modal-overlay">
+              <div className="env-form modal-content">
+                <div className="modal-key-icon">🔑</div>
+                <h3>Secrets needed to run this repo</h3>
+                <p className="hint">Only API keys / secrets are asked — everything else is auto-filled. Values stay in memory only.</p>
+                {detectedKeys.map((key) => (
+                  <div className="env-row" key={key}>
+                    <label htmlFor={`env-${key}`}>{key}</label>
+                    <input
+                      id={`env-${key}`}
+                      type="password"
+                      value={envValues[key] || ''}
+                      onChange={(e) => setEnvValues((prev) => ({ ...prev, [key]: e.target.value }))}
+                      placeholder={`Enter ${key}…`}
+                    />
+                  </div>
+                ))}
+                <button className="btn-primary" onClick={handleRunWithEnv}>
+                  Run with these values
+                </button>
+              </div>
+            </div>
+          )}
         </div>
 
         {/* Terminal Side Panel (Right) */}
@@ -686,31 +712,6 @@ export default function App() {
             <div className="terminal-wrap" ref={termRef} />
           </div>
         </div>
-        
-        {/* Environment Variables Modal */}
-        {stage === STAGES.NEEDS_ENV && (
-          <div className="modal-overlay">
-            <div className="env-form modal-content">
-              <h3>Environment Variables Required</h3>
-              <p className="hint">Detected from .env.example. Values stay in memory only.</p>
-              {detectedKeys.map((key) => (
-                <div className="env-row" key={key}>
-                  <label htmlFor={`env-${key}`}>{key}</label>
-                  <input
-                    id={`env-${key}`}
-                    type="password"
-                    value={envValues[key] || ''}
-                    onChange={(e) => setEnvValues((prev) => ({ ...prev, [key]: e.target.value }))}
-                    placeholder="Enter value..."
-                  />
-                </div>
-              ))}
-              <button className="btn-primary" onClick={handleRunWithEnv}>
-                Run with these values
-              </button>
-            </div>
-          </div>
-        )}
 
       </main>
 
