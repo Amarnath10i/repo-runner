@@ -275,6 +275,30 @@ const RUNTIME_CONFIGS = [
       dockerfile: null,
     }),
   },
+  {
+    id: 'cpp',
+    label: 'C / C++',
+    icon: '🔧',
+    color: '#00599c',
+    detect: (dir) =>
+      existsSync(join(dir, 'CMakeLists.txt')) ||
+      findFileRecursive(dir, '.cpp', true) !== null ||
+      findFileRecursive(dir, '.cc', true) !== null ||
+      findFileRecursive(dir, '.cxx', true) !== null ||
+      findFileRecursive(dir, '.c', true) !== null,
+    getCommands: (dir) => {
+      // `console: true` marks a program with no web server / preview — its
+      // output is streamed to the terminal instead. Compilation is handled by
+      // the native runner (it enumerates the source files).
+      if (existsSync(join(dir, 'CMakeLists.txt'))) {
+        return { install: 'cmake -B build && cmake --build build', start: null, dockerfile: null, console: true };
+      }
+      if (existsSync(join(dir, 'Makefile')) || existsSync(join(dir, 'makefile'))) {
+        return { install: 'make', start: null, dockerfile: null, console: true };
+      }
+      return { install: null, start: null, dockerfile: null, console: true };
+    },
+  },
 ];
 
 // Docker-based runtimes need a Docker daemon; everything else can run natively.
@@ -569,6 +593,7 @@ export function getDockerImage(runtimeId) {
     'php': 'php:8.3-cli',
     'java-maven': 'maven:3.9-eclipse-temurin-21',
     'java-gradle': 'gradle:8-jdk21',
+    'cpp': 'gcc:latest',
     'dotnet': 'mcr.microsoft.com/dotnet/sdk:8.0',
   };
   return images[runtimeId] || 'ubuntu:22.04';

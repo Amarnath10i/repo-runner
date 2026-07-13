@@ -264,6 +264,18 @@ app.post('/api/run-native', async (req, res) => {
           onOutput,
         });
 
+    // Console programs (C/C++) have no web server / port — the terminal output
+    // is the result, so there's no preview URL.
+    if (!hostPort) {
+      broadcast(sessionId, {
+        type: 'stage',
+        stage: 'ready',
+        message: 'Program is running (console output in the terminal).',
+      });
+      res.json({ ok: true, previewUrl: null, port: null, mode: 'native-console' });
+      return;
+    }
+
     const previewUrl = `http://localhost:${hostPort}`;
 
     broadcast(sessionId, {

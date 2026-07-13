@@ -3,7 +3,7 @@
 // Falls back to Docker sandbox if the runtime isn't installed locally.
 
 import { spawn, execSync } from 'child_process';
-import { join } from 'path';
+import { join, relative } from 'path';
 import { writeFileSync, existsSync } from 'fs';
 import { createConnection } from 'net';
 import {
@@ -126,7 +126,9 @@ export function checkNativeRuntimes() {
     java: isCommandAvailable('java'),
     dotnet: isCommandAvailable('dotnet'),
     node: isCommandAvailable('node'),
+    cppCompiler: isCommandAvailable('g++') ? 'g++' : isCommandAvailable('clang++') ? 'clang++' : null,
   };
+  _cachedRuntimes.cpp = !!_cachedRuntimes.cppCompiler;
 
   // Log detected runtimes on first check
   const found = Object.entries(_cachedRuntimes)
@@ -162,6 +164,7 @@ export function canRunNatively(runtimeId) {
     'java-gradle': runtimes.java,
     'dotnet': runtimes.dotnet,
     'node': runtimes.node,
+    'cpp': runtimes.cpp,
   };
   return runtimeMap[runtimeId] ?? false;
 }
@@ -421,11 +424,84 @@ const API_URL_ENV_KEYS = [
   'API_URL', 'API_BASE_URL', 'BACKEND_URL', 'PUBLIC_API_URL',
 ];
 
+/** Recursively collect source files with the given extensions under `dir`. */
+function collectSources(dir, exts, base = dir, out = []) {
+  let items;
+  try {
+    items = readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return out;
+  }
+  for (const it of items) {
+    const p = join(dir, it.name);
+    if (it.isDirectory()) {
+      if (!SOURCE_SKIP_DIRS.has(it.name)) collectSources(p, exts, base, out);
+    } else {
+      const dot = it.name.lastIndexOf('.');
+      if (dot >= 0 && exts.has(it.name.slice(dot))) {
+        out.push(relative(base, p));
+      }
+    }
+  }
+  return out;
+}
+
+const SOURCE_SKIP_DIRS = new Set(['.git', 'build', 'bin', 'obj', 'node_modules', '.vscode', 'cmake-build-debug']);
+
+/**
+ * Compile and run a C/C++ console program, streaming its output to the
+ * terminal. Console programs have no web server, so there's no preview port —
+ * `hostPort` is null and the UI shows the terminal output only.
+ */
+async function startConsoleApp({ sessionId, repoDir, runtime, cwd, envVars, runtimes, onOutput }) {
+  const processEnv = { ...process.env, ...(envVars || {}) };
+  const isWin = process.platform === 'win32';
+
+  if (runtime.id === 'cpp') {
+    const compiler = runtimes.cppCompiler;
+    if (!compiler) {
+      throw new Error('No C/C++ compiler found. Install g++ (MinGW-w64 on Windows) or use Docker.');
+    }
+    const cppSources = collectSources(cwd, new Set(['.cpp', '.cc', '.cxx']));
+    const cSources = cppSources.length === 0 ? collectSources(cwd, new Set(['.c'])) : [];
+    const sources = cppSources.length ? cppSources : cSources;
+    if (sources.length === 0) throw new Error('No C/C++ source files found to compile.');
+
+    const outBin = isWin ? 'repo-runner-app.exe' : 'repo-runner-app';
+    const useC = cppSources.length === 0;
+    const cc = useC ? (isCommandAvailable('gcc') ? 'gcc' : compiler) : compiler;
+    const std = useC ? '-std=c11' : '-std=c++17';
+
+    onOutput(`\n🔨 Compiling ${sources.length} source file(s) with ${cc}...\n`);
+    const compile = await spawnWithOutput(cc, [...sources, '-O2', std, '-o', outBin], { cwd, env: processEnv }, onOutput);
+    if (compile.code !== 0) {
+      throw new Error(`Compilation failed (exit code ${compile.code}). See the errors above.`);
+    }
+    onOutput(`\n✅ Compiled successfully. Running the program:\n`);
+    onOutput(`\x1b[2m(this is a console program — output appears here; it has no web preview)\x1b[0m\n\n`);
+
+    const runPath = isWin ? outBin : `./${outBin}`;
+    const proc = spawnApp({ startCmd: runPath, startArgs: [], cwd, processEnv, onOutput });
+
+    const cleanupTimer = setTimeout(() => {
+      stopNativeProcess(sessionId, (msg) => console.log(`[auto-cleanup] ${msg}`));
+    }, SESSION_TIMEOUT_MS);
+
+    nativeSessions.set(sessionId, {
+      processes: [proc], hostPort: null, ports: [], runtime, repoDir, cleanupTimer, mode: 'native-console',
+    });
+
+    proc.on('exit', (code) => onOutput(`\n\x1b[2m[process exited with code ${code}]\x1b[0m\n`));
+    return { hostPort: null, console: true };
+  }
+
+  throw new Error(`Console runtime ${runtime.label} is not supported yet.`);
+}
+
 /**
  * Start a native process for a repo (no Docker needed).
  */
 export async function startNativeProcess({ sessionId, repoDir, runtime, envVars, onOutput }) {
-  const hostPort = getAvailablePort();
   const runtimes = checkNativeRuntimes();
 
   // The runnable app may live in a subfolder (monorepo) — run everything there.
@@ -433,6 +509,13 @@ export async function startNativeProcess({ sessionId, repoDir, runtime, envVars,
   if (runtime.workdir) {
     onOutput(`\n📂 Project detected in ./${runtime.workdir} — running there.\n`);
   }
+
+  // Console programs (C/C++) have no web server — compile & run to the terminal.
+  if (runtime.console) {
+    return startConsoleApp({ sessionId, repoDir, runtime, cwd, envVars, runtimes, onOutput });
+  }
+
+  const hostPort = getAvailablePort();
 
   // Write .env file if needed
   writeEnvFile(cwd, envVars, onOutput);

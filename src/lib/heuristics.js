@@ -57,6 +57,7 @@ const RUNTIME_SIGNATURES = [
   { runtime: 'ruby', files: ['Gemfile'], label: 'Ruby' },
   { runtime: 'java', files: ['pom.xml', 'build.gradle', 'build.gradle.kts'], label: 'Java' },
   { runtime: 'dotnet', files: ['*.csproj', '*.sln'], label: '.NET / C#' },
+  { runtime: 'cpp', files: ['CMakeLists.txt', '*.cpp', '*.cc', '*.cxx'], label: 'C / C++' },
   { runtime: 'docker', files: ['Dockerfile', 'docker-compose.yml', 'docker-compose.yaml', 'compose.yml'], label: 'Docker-based' },
 ];
 
