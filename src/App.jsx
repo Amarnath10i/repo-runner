@@ -678,7 +678,6 @@ export default function App() {
           {stage === STAGES.NEEDS_ENV && (
             <div className="modal-overlay">
               <div className="env-form modal-content">
-                <h3>Secrets needed to run this repo</h3>
                 {detectedKeys.map((key) => (
                   <div className="env-row" key={key}>
                     <label htmlFor={`env-${key}`}>{key}</label>
