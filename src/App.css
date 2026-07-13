@@ -66,6 +66,32 @@ body {
   position: relative;
   overflow: hidden;
   background: #000000;
+  z-index: 0;
+}
+
+.app::before,
+.app::after {
+  content: '';
+  position: absolute;
+  width: 50vw;
+  height: 50vw;
+  border-radius: 50%;
+  filter: blur(100px);
+  z-index: -1;
+  animation: float-liquid 12s ease-in-out infinite alternate;
+}
+
+.app::before {
+  top: -20%;
+  left: -10%;
+  background: rgba(204, 26, 26, 0.12); /* Subtle red glow */
+}
+
+.app::after {
+  bottom: -20%;
+  right: -10%;
+  background: rgba(58, 26, 138, 0.12); /* Subtle purple/blue glow */
+  animation-delay: -6s;
 }
 
 /* ─── Topbar ─── */
@@ -204,34 +230,9 @@ body {
   justify-content: center;
   position: relative;
   z-index: 1;
-  background: var(--bg-deep);
-  overflow: hidden;
 }
 
-.hero-layout::before,
-.hero-layout::after {
-  content: '';
-  position: absolute;
-  width: 50vw;
-  height: 50vw;
-  border-radius: 50%;
-  filter: blur(100px);
-  z-index: -1;
-  animation: float-liquid 12s ease-in-out infinite alternate;
-}
-
-.hero-layout::before {
-  top: -20%;
-  left: -10%;
-  background: rgba(204, 26, 26, 0.12); /* Subtle red glow */
-}
-
-.hero-layout::after {
-  bottom: -20%;
-  right: -10%;
-  background: rgba(58, 26, 138, 0.12); /* Subtle purple/blue glow */
-  animation-delay: -6s;
-}
+/* Liquid animation is now on .app */
 
 @keyframes float-liquid {
   0% { transform: translate(0, 0) scale(1); }
@@ -325,11 +326,11 @@ body {
   background-color: transparent !important;
   border: none;
   padding: 1.5rem 2rem;
-  font-family: 'Caveat', cursive;
-  font-size: 1.6rem;
+  font-family: var(--font-mono);
+  font-size: 1.2rem;
   color: #ffffff !important;
-  font-weight: 600;
-  letter-spacing: 0.08em;
+  font-weight: 700;
+  letter-spacing: 0.02em;
   outline: none;
 }
 
@@ -343,11 +344,11 @@ body {
 }
 
 .hero-input::placeholder {
-  font-family: 'Caveat', cursive;
-  font-size: 1.6rem;
-  color: rgba(255, 255, 255, 0.6);
-  font-weight: 600;
-  letter-spacing: 0.08em;
+  font-family: var(--font-mono);
+  font-size: 1.2rem;
+  color: rgba(255, 255, 255, 0.5);
+  font-weight: 700;
+  letter-spacing: 0.02em;
 }
 
 .btn-hero-primary {
