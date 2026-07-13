@@ -161,15 +161,32 @@ export default function App() {
     });
     const fit = new FitAddon();
     term.loadAddon(fit);
-    term.open(termRef.current);
-    fit.fit();
+    
+    if (termRef.current) {
+      term.open(termRef.current);
+      try { fit.fit(); } catch (e) {}
+    }
+    
     termInstance.current = term;
     fitAddon.current = fit;
 
-    const onResize = () => fit.fit();
+    const onResize = () => {
+      try { fit.fit(); } catch (e) {}
+    };
+
+    let resizeObserver = null;
+    if (termRef.current) {
+      // Use ResizeObserver so xterm automatically fits when the drawer toggles or un-hides
+      resizeObserver = new ResizeObserver(() => {
+        window.requestAnimationFrame(() => onResize());
+      });
+      resizeObserver.observe(termRef.current);
+    }
+
     window.addEventListener('resize', onResize);
     return () => {
       window.removeEventListener('resize', onResize);
+      if (resizeObserver) resizeObserver.disconnect();
       term.dispose();
     };
   }, []);
