@@ -605,15 +605,6 @@ export default function App() {
         {/* Main workspace area (Preview takes over) */}
         <div className="workspace-main">
           
-          {/* Loading Overlay (Horizontal Pipeline) */}
-          {stage !== STAGES.READY && stage !== STAGES.IDLE && (
-            <div className="loading-overlay">
-              <div className="loading-calligraphy">
-                This May Take A While
-              </div>
-            </div>
-          )}
-
           {previewUrl ? (
              <iframe
                key={executionMode === 'webcontainer' ? 'wc' : 'ext'}
