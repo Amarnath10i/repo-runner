@@ -267,13 +267,22 @@ body {
 }
 
 .hero-size .brand-git {
-  font-size: 2.8rem;
+  display: flex;
+  align-items: baseline;
+}
+
+.hero-size .brand-g {
+  font-size: 8rem;
+}
+
+.hero-size .brand-it {
+  font-size: 5rem;
 }
 
 .hero-size .brand-live {
-  font-size: 4.2rem;
-  margin-left: -0.8rem;
-  transform: translateY(1.2rem);
+  font-size: 8rem;
+  margin-left: -1rem;
+  transform: translateY(1rem);
   padding-right: 0.5rem; /* Fixes cut-off e in cursive font */
 }
 
