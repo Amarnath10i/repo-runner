@@ -4,7 +4,7 @@ import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
 import { parseGithubUrl, getDefaultBranch, fetchRepoTree, hydrateAllFiles, detectEnvVars } from './lib/github.js';
 import { runRepo } from './lib/runner.js';
-import { analyzeRepo } from './lib/ollama.js';
+import { analyzeRepo, checkOllamaAvailable } from './lib/ollama.js';
 import { analyzeTreeLocally } from './lib/heuristics.js';
 import {
   analyzeRepoBackend,
@@ -69,8 +69,9 @@ export default function App() {
   // Pre-fill the GitHub token from a local .env (VITE_GITHUB_TOKEN) so it
   // doesn't have to be entered every time. Still editable in the UI.
   const [token, setToken] = useState(import.meta.env.VITE_GITHUB_TOKEN || '');
-  const [ollamaEndpoint, setOllamaEndpoint] = useState('http://localhost:11434');
+  const [ollamaEndpoint] = useState('http://localhost:11434');
   const [ollamaModel, setOllamaModel] = useState('llama3.1');
+  // Auto-enabled when a local Ollama server is detected (no manual toggle).
   const [useOllama, setUseOllama] = useState(false);
   const [stage, setStage] = useState(STAGES.IDLE);
   const [errorMsg, setErrorMsg] = useState('');
@@ -108,6 +109,23 @@ export default function App() {
     const interval = setInterval(() => refreshBackendStatus(0), 10000);
     return () => clearInterval(interval);
   }, [refreshBackendStatus]);
+
+  // Auto-enable Ollama analysis when a local Ollama server is detected — no UI
+  // toggle needed. Falls back silently to the built-in heuristic otherwise.
+  useEffect(() => {
+    let cancelled = false;
+    checkOllamaAvailable(ollamaEndpoint).then(({ available, models }) => {
+      if (cancelled || !available) return;
+      setUseOllama(true);
+      // Prefer the configured model, else the first one the server has.
+      setOllamaModel((cur) =>
+        models.length && !models.some((m) => m.startsWith(cur)) ? models[0] : cur
+      );
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [ollamaEndpoint]);
 
   // Terminal setup
   useEffect(() => {
@@ -559,67 +577,6 @@ export default function App() {
                 required
               />
             </div>
-
-            {/* GitHub Token */}
-            <details className="advanced">
-              <summary>GitHub Token (optional)</summary>
-              <div className="advanced-content">
-                <p className="hint">
-                  Raises GitHub API rate limit from 60 to 5,000 req/hour. Required for private repos.
-                  Stored in memory only.
-                </p>
-                <input
-                  type="password"
-                  placeholder="ghp_..."
-                  value={token}
-                  onChange={(e) => setToken(e.target.value)}
-                  disabled={isBusy}
-                />
-              </div>
-            </details>
-
-            {/* Ollama */}
-            <details className="advanced">
-              <summary>Local Ollama (smart analysis)</summary>
-              <div className="advanced-content">
-                <p className="hint">
-                  Uses a local LLM to read the README and figure out the real install/start
-                  commands instead of guessing.
-                </p>
-                <label className="checkbox-row">
-                  <input
-                    type="checkbox"
-                    checked={useOllama}
-                    onChange={(e) => setUseOllama(e.target.checked)}
-                    disabled={isBusy}
-                  />
-                  Enable Ollama analysis
-                </label>
-                {useOllama && (
-                  <>
-                    <label className="form-label" htmlFor="ollama-endpoint">Endpoint</label>
-                    <input
-                      id="ollama-endpoint"
-                      type="text"
-                      value={ollamaEndpoint}
-                      onChange={(e) => setOllamaEndpoint(e.target.value)}
-                      disabled={isBusy}
-                    />
-                    <label className="form-label" htmlFor="ollama-model">Model</label>
-                    <input
-                      id="ollama-model"
-                      type="text"
-                      value={ollamaModel}
-                      onChange={(e) => setOllamaModel(e.target.value)}
-                      disabled={isBusy}
-                    />
-                    <p className="hint">
-                      Requires: <code>OLLAMA_ORIGINS=* ollama serve</code>
-                    </p>
-                  </>
-                )}
-              </div>
-            </details>
 
             <div className="btn-row">
               <button className="btn-primary" type="submit" disabled={isBusy || !repoUrl}>

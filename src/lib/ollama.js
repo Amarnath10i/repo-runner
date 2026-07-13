@@ -47,6 +47,23 @@ Rules:
 - "reasoning" must be at most 2 short sentences.
 - Output nothing but the JSON object.`;
 
+/**
+ * Quick check whether an Ollama server is reachable, and which models it has.
+ * Used to auto-enable Ollama analysis only when it's actually running.
+ */
+export async function checkOllamaAvailable(endpoint) {
+  try {
+    const res = await fetch(`${endpoint.replace(/\/$/, '')}/api/tags`, {
+      signal: AbortSignal.timeout(1500),
+    });
+    if (!res.ok) return { available: false, models: [] };
+    const data = await res.json();
+    return { available: true, models: (data.models || []).map((m) => m.name) };
+  } catch {
+    return { available: false, models: [] };
+  }
+}
+
 export async function analyzeRepo({ tree, endpoint, model, onProgress }) {
   const context = collectContext(tree);
 
