@@ -485,6 +485,7 @@ export default function App() {
   const isBusy = [STAGES.FETCHING, STAGES.ANALYZING, STAGES.BUILDING, STAGES.RUNNING].includes(stage);
   const currentStep = stageToStep(stage);
   const currentStepIdx = currentStep ? stepIndex(currentStep) : -1;
+  const { percent: progressPct, eta: progressEta } = getProgressDetails(stage);
 
   return (
     <div className="app">
@@ -525,42 +526,43 @@ export default function App() {
         </div>
       </header>
 
-      {stage === STAGES.IDLE ? (
-        <main className="hero-layout">
-          <div className="hero-content">
-            <h1 className="hero-title">Instant Live Demo</h1>
-            <p className="hero-subtitle">Paste any GitHub repository URL and we'll auto-detect, build, and run it instantly.</p>
-            
-            <form onSubmit={handleFetchRepo} className="hero-form">
-              <div className="hero-input-group">
-                <input
-                  id="repo-url"
-                  type="url"
-                  placeholder="https://github.com/owner/repo"
-                  value={repoUrl}
-                  onChange={(e) => setRepoUrl(e.target.value)}
-                  disabled={isBusy}
-                  required
-                  className="hero-input"
-                />
-                <button className="btn-hero-primary" type="submit" disabled={isBusy || !repoUrl}>
-                  {isBusy ? <span className="spinner" /> : 'Fetch & Run'}
-                </button>
-              </div>
-            </form>
-          </div>
-        </main>
-      ) : (
-        <main className="workspace-layout">
+      <main className={`hero-layout ${stage !== STAGES.IDLE ? 'hidden' : ''}`}>
+        <div className="hero-content">
+          <h1 className="hero-title">Instant Live Demo</h1>
+          <p className="hero-subtitle">Paste any GitHub repository URL and we'll auto-detect, build, and run it instantly.</p>
           
-          {/* Main workspace area (Preview takes over) */}
-          <div className="workspace-main">
-            
-            {/* Overlay Status Bar */}
-            <div className="workspace-status-bar">
+          <form onSubmit={handleFetchRepo} className="hero-form">
+            <div className="hero-input-group">
+              <input
+                id="repo-url"
+                type="url"
+                placeholder="https://github.com/owner/repo"
+                value={repoUrl}
+                onChange={(e) => setRepoUrl(e.target.value)}
+                disabled={isBusy}
+                required
+                className="hero-input"
+              />
+              <button className="btn-hero-primary" type="submit" disabled={isBusy || !repoUrl}>
+                {isBusy ? <span className="spinner" /> : 'Fetch & Run'}
+              </button>
+            </div>
+          </form>
+        </div>
+      </main>
+
+      <main className={`workspace-layout ${stage === STAGES.IDLE ? 'hidden' : ''}`}>
+        
+        {/* Main workspace area (Preview takes over) */}
+        <div className="workspace-main">
+          
+          {/* Overlay Status Bar */}
+          <div className="workspace-status-bar">
+             <div className="workspace-status-content">
                <div className="status-line compact">
                  <StatusDot stage={stage} />
                  <span>{statusLabel(stage)}</span>
+                 {isBusy && progressEta && <span className="eta-text">ETA: {progressEta}</span>}
                </div>
                
                {runtimeInfo && (
@@ -577,116 +579,126 @@ export default function App() {
                {(stage === STAGES.READY || stage === STAGES.RUNNING || stage === STAGES.BUILDING) && (
                  <button className="btn-stop-compact" type="button" onClick={handleStop}>Stop</button>
                )}
-            </div>
-
-            {previewUrl ? (
-               <iframe
-                 key={executionMode === 'webcontainer' ? 'wc' : 'ext'}
-                 title="preview"
-                 src={previewUrl}
-                 className="preview-frame full"
-                 {...(executionMode === 'webcontainer' ? {} : { credentialless: '' })}
-                 allow="accelerometer; camera; encrypted-media; geolocation; gyroscope; microphone; clipboard-read; clipboard-write"
-               />
-             ) : (
-               <div className="preview-empty full">
-                 {isBusy && (
-                   <div className="building-state">
-                     <span className="spinner large" />
-                     <div className="building-text">Preparing Sandbox...</div>
-                   </div>
-                 )}
-                 {stage === STAGES.ERROR && errorMsg.startsWith('docker_offline:') ? (() => {
-                    const runtimeName = errorMsg.split(':')[1];
-                    const isUnknown = !runtimeName || /^unknown$/i.test(runtimeName);
-                    return (
-                      <div className="docker-banner">
-                        <div className="docker-banner-icon">D</div>
-                        <div className="docker-banner-content">
-                          {isUnknown ? (
-                            <>
-                              <h4>Couldn't detect how to run this repo</h4>
-                              <p>No recognized runtime was found. Start Docker Desktop so it can build from a Dockerfile.</p>
-                            </>
-                          ) : (
-                            <>
-                              <h4>{runtimeName} Runtime Not Found</h4>
-                              <p>Install {runtimeName} locally or start Docker Desktop to run in a sandbox.</p>
-                            </>
-                          )}
-                          <button className="btn-check-again" onClick={async () => {
-                            const status = await refreshBackendStatus(0);
-                            if (status.dockerOnline) {
-                              setStage(STAGES.IDLE);
-                              setErrorMsg('');
-                            }
-                          }}>
-                            <span className="refresh-icon">↻</span> Check Again
-                          </button>
-                        </div>
-                      </div>
-                    );
-                  })() : stage === STAGES.ERROR ? (
-                    <div className="error-box">{errorMsg}</div>
-                  ) : !isBusy && (
-                    <div className="preview-empty-text">
-                      The live preview will appear here once your app starts running.
-                    </div>
-                  )}
+             </div>
+             
+             {/* Integrated Progress Bar */}
+             {(isBusy || stage === STAGES.READY || stage === STAGES.NEEDS_ENV) && (
+               <div className="status-progress-track">
+                 <div 
+                   className={`status-progress-fill ${stage === STAGES.READY ? 'done' : ''}`} 
+                   style={{ width: `${progressPct}%` }} 
+                 />
                </div>
              )}
           </div>
 
-          {/* Terminal Drawer (Bottom) */}
-          <div className={`terminal-drawer ${isTerminalOpen ? 'open' : 'closed'}`}>
-            <div className="drawer-header" onClick={() => setIsTerminalOpen(!isTerminalOpen)}>
-              <div className="drawer-header-left">
-                <div className="window-dots">
-                  <span className="window-dot red" />
-                  <span className="window-dot yellow" />
-                  <span className="window-dot green" />
-                </div>
-                Terminal
+          {previewUrl ? (
+             <iframe
+               key={executionMode === 'webcontainer' ? 'wc' : 'ext'}
+               title="preview"
+               src={previewUrl}
+               className="preview-frame full"
+               {...(executionMode === 'webcontainer' ? {} : { credentialless: '' })}
+               allow="accelerometer; camera; encrypted-media; geolocation; gyroscope; microphone; clipboard-read; clipboard-write"
+             />
+           ) : (
+             <div className="preview-empty full">
+               {isBusy && (
+                 <div className="building-state">
+                   <span className="spinner large" />
+                   <div className="building-text">Preparing Sandbox...</div>
+                 </div>
+               )}
+               {stage === STAGES.ERROR && (errorMsg || '').startsWith('docker_offline:') ? (() => {
+                  const runtimeName = errorMsg.split(':')[1];
+                  const isUnknown = !runtimeName || /^unknown$/i.test(runtimeName);
+                  return (
+                    <div className="docker-banner">
+                      <div className="docker-banner-icon">D</div>
+                      <div className="docker-banner-content">
+                        {isUnknown ? (
+                          <>
+                            <h4>Couldn't detect how to run this repo</h4>
+                            <p>No recognized runtime was found. Start Docker Desktop so it can build from a Dockerfile.</p>
+                          </>
+                        ) : (
+                          <>
+                            <h4>{runtimeName} Runtime Not Found</h4>
+                            <p>Install {runtimeName} locally or start Docker Desktop to run in a sandbox.</p>
+                          </>
+                        )}
+                        <button className="btn-check-again" onClick={async () => {
+                          const status = await refreshBackendStatus(0);
+                          if (status.dockerOnline) {
+                            setStage(STAGES.IDLE);
+                            setErrorMsg('');
+                          }
+                        }}>
+                          <span className="refresh-icon">↻</span> Check Again
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })() : stage === STAGES.ERROR ? (
+                  <div className="error-box">{errorMsg}</div>
+                ) : !isBusy && (
+                  <div className="preview-empty-text">
+                    The live preview will appear here once your app starts running.
+                  </div>
+                )}
+             </div>
+           )}
+        </div>
+
+        {/* Terminal Drawer (Bottom) */}
+        <div className={`terminal-drawer ${isTerminalOpen ? 'open' : 'closed'}`}>
+          <div className="drawer-header" onClick={() => setIsTerminalOpen(!isTerminalOpen)}>
+            <div className="drawer-header-left">
+              <div className="window-dots">
+                <span className="window-dot red" />
+                <span className="window-dot yellow" />
+                <span className="window-dot green" />
               </div>
-              <div className="drawer-header-right">
-                <button className="btn-toggle-drawer">
-                  {isTerminalOpen ? '▼' : '▲'}
-                </button>
-              </div>
+              Terminal
             </div>
-            
-            <div className="drawer-content">
-              <div className="terminal-wrap" ref={termRef} />
+            <div className="drawer-header-right">
+              <button className="btn-toggle-drawer">
+                {isTerminalOpen ? '▼' : '▲'}
+              </button>
             </div>
           </div>
           
-          {/* Environment Variables Modal */}
-          {stage === STAGES.NEEDS_ENV && (
-            <div className="modal-overlay">
-              <div className="env-form modal-content">
-                <h3>Environment Variables Required</h3>
-                <p className="hint">Detected from .env.example. Values stay in memory only.</p>
-                {detectedKeys.map((key) => (
-                  <div className="env-row" key={key}>
-                    <label htmlFor={`env-${key}`}>{key}</label>
-                    <input
-                      id={`env-${key}`}
-                      type="password"
-                      value={envValues[key] || ''}
-                      onChange={(e) => setEnvValues((prev) => ({ ...prev, [key]: e.target.value }))}
-                      placeholder="Enter value..."
-                    />
-                  </div>
-                ))}
-                <button className="btn-primary" onClick={handleRunWithEnv}>
-                  Run with these values
-                </button>
-              </div>
+          <div className="drawer-content">
+            <div className="terminal-wrap" ref={termRef} />
+          </div>
+        </div>
+        
+        {/* Environment Variables Modal */}
+        {stage === STAGES.NEEDS_ENV && (
+          <div className="modal-overlay">
+            <div className="env-form modal-content">
+              <h3>Environment Variables Required</h3>
+              <p className="hint">Detected from .env.example. Values stay in memory only.</p>
+              {detectedKeys.map((key) => (
+                <div className="env-row" key={key}>
+                  <label htmlFor={`env-${key}`}>{key}</label>
+                  <input
+                    id={`env-${key}`}
+                    type="password"
+                    value={envValues[key] || ''}
+                    onChange={(e) => setEnvValues((prev) => ({ ...prev, [key]: e.target.value }))}
+                    placeholder="Enter value..."
+                  />
+                </div>
+              ))}
+              <button className="btn-primary" onClick={handleRunWithEnv}>
+                Run with these values
+              </button>
             </div>
-          )}
+          </div>
+        )}
 
-        </main>
-      )}
+      </main>
 
       {/* Footer only in idle state */}
       {stage === STAGES.IDLE && (
@@ -728,4 +740,16 @@ function StatusDot({ stage }) {
     [STAGES.ERROR]: 'dot-error',
   }[stage] || 'dot-idle';
   return <span className={`status-dot ${cls}`} />;
+}
+
+function getProgressDetails(stage) {
+  switch (stage) {
+    case STAGES.FETCHING: return { percent: 15, eta: '~ 3s' };
+    case STAGES.ANALYZING: return { percent: 30, eta: '~ 2s' };
+    case STAGES.NEEDS_ENV: return { percent: 30, eta: 'Paused' };
+    case STAGES.BUILDING: return { percent: 60, eta: '~ 30s' };
+    case STAGES.RUNNING: return { percent: 85, eta: '~ 10s' };
+    case STAGES.READY: return { percent: 100, eta: 'Done' };
+    default: return { percent: 0, eta: '' };
+  }
 }

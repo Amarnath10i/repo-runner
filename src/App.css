@@ -177,6 +177,10 @@ body {
 }
 
 /* ─── Hero Landing Page (Idle) ─── */
+.hidden {
+  display: none !important;
+}
+
 .hero-layout {
   flex: 1;
   display: flex;
@@ -308,16 +312,51 @@ body {
   left: 50%;
   transform: translateX(-50%);
   display: flex;
-  align-items: center;
-  gap: 0.75rem;
-  padding: 0.5rem 1rem;
+  flex-direction: column;
   background: rgba(0, 0, 0, 0.6);
   backdrop-filter: blur(12px);
   border: 1px solid var(--border-medium);
-  border-radius: 100px;
+  border-radius: var(--radius-md);
   z-index: 50;
   box-shadow: var(--shadow-card);
   animation: slide-down 0.4s var(--transition-spring);
+  overflow: hidden;
+}
+
+.workspace-status-content {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.5rem 1rem;
+}
+
+.eta-text {
+  font-family: var(--font-mono);
+  font-size: 0.65rem;
+  color: rgba(255, 255, 255, 0.5);
+  background: rgba(255, 255, 255, 0.05);
+  padding: 0.15rem 0.4rem;
+  border-radius: var(--radius-sm);
+  margin-left: 0.5rem;
+  letter-spacing: 0.02em;
+}
+
+.status-progress-track {
+  width: 100%;
+  height: 3px;
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.status-progress-fill {
+  height: 100%;
+  background: var(--accent-primary);
+  transition: width 0.5s ease-in-out;
+  box-shadow: 0 0 8px rgba(90, 122, 238, 0.5);
+}
+
+.status-progress-fill.done {
+  background: var(--status-ready);
+  box-shadow: 0 0 8px rgba(43, 184, 122, 0.5);
 }
 
 @keyframes slide-down {
