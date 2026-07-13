@@ -568,7 +568,7 @@ export default function App() {
               <input
                 id="repo-url"
                 type="url"
-                placeholder="https://github.com/owner/repository"
+                placeholder="Paste the URL"
                 value={repoUrl}
                 onChange={(e) => setRepoUrl(e.target.value)}
                 disabled={isBusy}
@@ -580,7 +580,7 @@ export default function App() {
               </button>
             </div>
           </form>
-          <p className="hero-tagline">Experience a frictionless</p>
+          <p className="hero-tagline">Experience A Frictionless Workflow</p>
         </div>
       </main>
 
