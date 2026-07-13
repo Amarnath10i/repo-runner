@@ -83,6 +83,7 @@ export default function App() {
   const [dockerOnline, setDockerOnline] = useState(false);
   const [nativeRuntimes, setNativeRuntimes] = useState({});
   const [executionMode, setExecutionMode] = useState(null); // 'webcontainer' | 'docker' | 'native'
+  const [isTerminalOpen, setIsTerminalOpen] = useState(true);
 
   const treeRef = useRef(null);
   const blobsRef = useRef(null);
@@ -492,21 +493,9 @@ export default function App() {
           <div className="brand-mark">R</div>
           <span className="brand-name">Repo Runner</span>
         </div>
-        <span className="brand-tag">paste a GitHub URL — instant live demo</span>
-
-        <div className="topbar-right">
-          <div className={`backend-badge ${dockerOnline ? 'online' : serverOnline ? 'warning' : 'offline'}`}>
-            <span className="badge-dot" />
-            {dockerOnline ? 'Docker Online' : serverOnline ? 'Docker Offline' : 'Server Offline'}
-          </div>
-        </div>
-      </header>
-
-      <main className="layout">
-        {/* ── Control Pane ── */}
-        <section className="control-pane">
-          {/* Pipeline indicator */}
-          <div className="pipeline">
+        
+        {stage !== STAGES.IDLE && (
+          <div className="pipeline compact">
             {PIPELINE_STEPS.map((step, i) => {
               const idx = stepIndex(step.key);
               let cls = '';
@@ -517,13 +506,7 @@ export default function App() {
 
               return (
                 <span key={step.key} style={{ display: 'contents' }}>
-                  {i > 0 && (
-                    <span
-                      className={`pipeline-connector${
-                        cls === 'done' ? ' done' : cls === 'active' ? ' active' : ''
-                      }`}
-                    />
-                  )}
+                  {i > 0 && <span className={`pipeline-connector${cls === 'done' ? ' done' : cls === 'active' ? ' active' : ''}`} />}
                   <span className={`pipeline-stage ${cls}`}>
                     <span className="stage-dot" />
                     {step.label}
@@ -532,220 +515,189 @@ export default function App() {
               );
             })}
           </div>
+        )}
 
-          {/* Runtime badge */}
-          {runtimeInfo && (
-            <div
-              className="runtime-badge"
-              style={{
-                color: runtimeInfo.color,
-                borderColor: runtimeInfo.color + '22',
-                background: runtimeInfo.color + '08',
-              }}
-            >
-              {runtimeInfo.label}
-              {executionMode && (
-                <span style={{ opacity: 0.5, fontSize: '0.6rem', marginLeft: '0.15rem' }}>
-                  via {executionMode === 'webcontainer' ? 'WebContainer' : executionMode === 'native' ? 'Native' : 'Docker'}
-                </span>
-              )}
-            </div>
-          )}
+        <div className="topbar-right">
+          <div className={`backend-badge ${dockerOnline ? 'online' : serverOnline ? 'warning' : 'offline'}`}>
+            <span className="badge-dot" />
+            {dockerOnline ? 'Docker Online' : serverOnline ? 'Docker Offline' : 'Server Offline'}
+          </div>
+        </div>
+      </header>
 
-          {/* Progress bar */}
-          {isBusy && (
-            <div className="progress-bar">
-              <div className="progress-bar-fill" />
-            </div>
-          )}
-
-          {/* Repo URL form */}
-          <form onSubmit={handleFetchRepo} className="repo-form">
-            <label className="form-label" htmlFor="repo-url">
-              GitHub Repository URL
-            </label>
-            <div className="input-group">
-              <input
-                id="repo-url"
-                type="url"
-                placeholder="https://github.com/owner/repo"
-                value={repoUrl}
-                onChange={(e) => setRepoUrl(e.target.value)}
-                disabled={isBusy}
-                required
-              />
-            </div>
-
-            <div className="btn-row">
-              <button className="btn-primary" type="submit" disabled={isBusy || !repoUrl}>
-                {isBusy ? (
-                  <>
-                    <span className="spinner" /> Working…
-                  </>
-                ) : (
-                  'Fetch & Run'
-                )}
-              </button>
-              {(stage === STAGES.READY || stage === STAGES.RUNNING || stage === STAGES.BUILDING) && (
-                <button className="btn-stop" type="button" onClick={handleStop}>
-                  Stop
+      {stage === STAGES.IDLE ? (
+        <main className="hero-layout">
+          <div className="hero-content">
+            <h1 className="hero-title">Instant Live Demo</h1>
+            <p className="hero-subtitle">Paste any GitHub repository URL and we'll auto-detect, build, and run it instantly.</p>
+            
+            <form onSubmit={handleFetchRepo} className="hero-form">
+              <div className="hero-input-group">
+                <input
+                  id="repo-url"
+                  type="url"
+                  placeholder="https://github.com/owner/repo"
+                  value={repoUrl}
+                  onChange={(e) => setRepoUrl(e.target.value)}
+                  disabled={isBusy}
+                  required
+                  className="hero-input"
+                />
+                <button className="btn-hero-primary" type="submit" disabled={isBusy || !repoUrl}>
+                  {isBusy ? <span className="spinner" /> : 'Fetch & Run'}
                 </button>
-              )}
+              </div>
+            </form>
+          </div>
+        </main>
+      ) : (
+        <main className="workspace-layout">
+          
+          {/* Main workspace area (Preview takes over) */}
+          <div className="workspace-main">
+            
+            {/* Overlay Status Bar */}
+            <div className="workspace-status-bar">
+               <div className="status-line compact">
+                 <StatusDot stage={stage} />
+                 <span>{statusLabel(stage)}</span>
+               </div>
+               
+               {runtimeInfo && (
+                 <div className="runtime-badge compact" style={{ color: runtimeInfo.color, borderColor: runtimeInfo.color + '22', background: runtimeInfo.color + '08' }}>
+                   {runtimeInfo.label}
+                   {executionMode && (
+                     <span style={{ opacity: 0.5, fontSize: '0.6rem', marginLeft: '0.15rem' }}>
+                       via {executionMode === 'webcontainer' ? 'WebContainer' : executionMode === 'native' ? 'Native' : 'Docker'}
+                     </span>
+                   )}
+                 </div>
+               )}
+               
+               {(stage === STAGES.READY || stage === STAGES.RUNNING || stage === STAGES.BUILDING) && (
+                 <button className="btn-stop-compact" type="button" onClick={handleStop}>Stop</button>
+               )}
             </div>
-          </form>
 
-          {/* Env vars form */}
-          {stage === STAGES.NEEDS_ENV && (
-            <div className="env-form">
-              <h3>Environment Variables Required</h3>
-              <p className="hint">
-                Detected from .env.example. Values stay in memory only — never sent to external
-                servers.
-              </p>
-              {detectedKeys.map((key) => (
-                <div className="env-row" key={key}>
-                  <label htmlFor={`env-${key}`}>{key}</label>
-                  <input
-                    id={`env-${key}`}
-                    type="password"
-                    value={envValues[key] || ''}
-                    onChange={(e) =>
-                      setEnvValues((prev) => ({ ...prev, [key]: e.target.value }))
-                    }
-                    placeholder="Enter value..."
-                  />
-                </div>
-              ))}
-              <button className="btn-primary" onClick={handleRunWithEnv}>
-                Run with these values
-              </button>
-            </div>
-          )}
-
-          {/* Error — show runtime unavailable banner or generic error */}
-          {stage === STAGES.ERROR && errorMsg.startsWith('docker_offline:') ? (() => {
-            const runtimeName = errorMsg.split(':')[1];
-            const isUnknown = !runtimeName || /^unknown$/i.test(runtimeName);
-            return (
-              <div className="docker-banner">
-                <div className="docker-banner-icon">D</div>
-                <div className="docker-banner-content">
-                  {isUnknown ? (
-                    <>
-                      <h4>Couldn't detect how to run this repo</h4>
-                      <p>
-                        No recognized runtime (package.json, requirements.txt,
-                        go.mod, Dockerfile, etc.) was found. To run it anyway:
-                      </p>
-                      <ul className="docker-banner-options">
-                        <li>Start <strong>Docker Desktop</strong> so it can build from a Dockerfile/compose file</li>
-                        <li>Or double-check the repo URL points at a runnable app</li>
-                      </ul>
-                    </>
-                  ) : (
-                    <>
-                      <h4>{runtimeName} Runtime Not Found</h4>
-                      <p>
-                        This is a <strong>{runtimeName}</strong> project. To run it, either:
-                      </p>
-                      <ul className="docker-banner-options">
-                        <li>Install <strong>{runtimeName}</strong> on your machine (recommended — fastest)</li>
-                        <li>Or start <strong>Docker Desktop</strong> to run in a sandbox</li>
-                      </ul>
-                    </>
+            {previewUrl ? (
+               <iframe
+                 key={executionMode === 'webcontainer' ? 'wc' : 'ext'}
+                 title="preview"
+                 src={previewUrl}
+                 className="preview-frame full"
+                 {...(executionMode === 'webcontainer' ? {} : { credentialless: '' })}
+                 allow="accelerometer; camera; encrypted-media; geolocation; gyroscope; microphone; clipboard-read; clipboard-write"
+               />
+             ) : (
+               <div className="preview-empty full">
+                 {isBusy && (
+                   <div className="building-state">
+                     <span className="spinner large" />
+                     <div className="building-text">Preparing Sandbox...</div>
+                   </div>
+                 )}
+                 {stage === STAGES.ERROR && errorMsg.startsWith('docker_offline:') ? (() => {
+                    const runtimeName = errorMsg.split(':')[1];
+                    const isUnknown = !runtimeName || /^unknown$/i.test(runtimeName);
+                    return (
+                      <div className="docker-banner">
+                        <div className="docker-banner-icon">D</div>
+                        <div className="docker-banner-content">
+                          {isUnknown ? (
+                            <>
+                              <h4>Couldn't detect how to run this repo</h4>
+                              <p>No recognized runtime was found. Start Docker Desktop so it can build from a Dockerfile.</p>
+                            </>
+                          ) : (
+                            <>
+                              <h4>{runtimeName} Runtime Not Found</h4>
+                              <p>Install {runtimeName} locally or start Docker Desktop to run in a sandbox.</p>
+                            </>
+                          )}
+                          <button className="btn-check-again" onClick={async () => {
+                            const status = await refreshBackendStatus(0);
+                            if (status.dockerOnline) {
+                              setStage(STAGES.IDLE);
+                              setErrorMsg('');
+                            }
+                          }}>
+                            <span className="refresh-icon">↻</span> Check Again
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })() : stage === STAGES.ERROR ? (
+                    <div className="error-box">{errorMsg}</div>
+                  ) : !isBusy && (
+                    <div className="preview-empty-text">
+                      The live preview will appear here once your app starts running.
+                    </div>
                   )}
-                  <button
-                    className="btn-check-again"
-                    onClick={async () => {
-                      const status = await refreshBackendStatus(0);
-                      if (status.dockerOnline) {
-                        setStage(STAGES.IDLE);
-                        setErrorMsg('');
-                      }
-                    }}
-                  >
-                    <span className="refresh-icon">↻</span> Check Again
-                  </button>
+               </div>
+             )}
+          </div>
+
+          {/* Terminal Drawer (Bottom) */}
+          <div className={`terminal-drawer ${isTerminalOpen ? 'open' : 'closed'}`}>
+            <div className="drawer-header" onClick={() => setIsTerminalOpen(!isTerminalOpen)}>
+              <div className="drawer-header-left">
+                <div className="window-dots">
+                  <span className="window-dot red" />
+                  <span className="window-dot yellow" />
+                  <span className="window-dot green" />
                 </div>
+                Terminal
               </div>
-            );
-          })() : stage === STAGES.ERROR ? (
-            <div className="error-box">{errorMsg}</div>
-          ) : null}
-
-          {/* Status */}
-          <div className="status-line">
-            <StatusDot stage={stage} />
-            <span>{statusLabel(stage)}</span>
-          </div>
-        </section>
-
-        {/* ── Terminal Pane ── */}
-        <section className="output-pane">
-          <div className="pane-header">
-            <div className="window-dots">
-              <span className="window-dot red" />
-              <span className="window-dot yellow" />
-              <span className="window-dot green" />
+              <div className="drawer-header-right">
+                <button className="btn-toggle-drawer">
+                  {isTerminalOpen ? '▼' : '▲'}
+                </button>
+              </div>
             </div>
-            Terminal
-          </div>
-          <div className="terminal-wrap" ref={termRef} />
-        </section>
-
-        {/* ── Preview Pane ── */}
-        <section className={`preview-pane${previewUrl ? ' live' : ''}`}>
-          <div className="pane-header">
-            <div className="window-dots">
-              <span className="window-dot red" />
-              <span className="window-dot yellow" />
-              <span className="window-dot green" />
+            
+            <div className="drawer-content">
+              <div className="terminal-wrap" ref={termRef} />
             </div>
-            Preview
-            {previewUrl && (
-              <>
-                <span className="live-indicator">
-                  <span className="live-dot" />
-                  Live
-                </span>
-                <a className="url-chip" href={previewUrl} target="_blank" rel="noreferrer">
-                  {previewUrl}
-                </a>
-              </>
-            )}
           </div>
-          {previewUrl ? (
-            <iframe
-              // Remount when switching between preview kinds so the correct
-              // `credentialless` state is applied at element creation.
-              key={executionMode === 'webcontainer' ? 'wc' : 'ext'}
-              title="preview"
-              src={previewUrl}
-              className="preview-frame"
-              // `credentialless` lets this cross-origin-isolated page (COOP/COEP)
-              // embed a cross-origin localhost app (native/Docker) that doesn't
-              // send COEP itself. But WebContainer preview URLs need the normal
-              // credentialed context, so only set it for external previews.
-              {...(executionMode === 'webcontainer' ? {} : { credentialless: '' })}
-              allow="accelerometer; camera; encrypted-media; geolocation; gyroscope; microphone; clipboard-read; clipboard-write"
-            />
-          ) : (
-            <div className="preview-empty">
-              <div className="preview-empty-text">
-                The live preview will appear here once your app starts running.
+          
+          {/* Environment Variables Modal */}
+          {stage === STAGES.NEEDS_ENV && (
+            <div className="modal-overlay">
+              <div className="env-form modal-content">
+                <h3>Environment Variables Required</h3>
+                <p className="hint">Detected from .env.example. Values stay in memory only.</p>
+                {detectedKeys.map((key) => (
+                  <div className="env-row" key={key}>
+                    <label htmlFor={`env-${key}`}>{key}</label>
+                    <input
+                      id={`env-${key}`}
+                      type="password"
+                      value={envValues[key] || ''}
+                      onChange={(e) => setEnvValues((prev) => ({ ...prev, [key]: e.target.value }))}
+                      placeholder="Enter value..."
+                    />
+                  </div>
+                ))}
+                <button className="btn-primary" onClick={handleRunWithEnv}>
+                  Run with these values
+                </button>
               </div>
             </div>
           )}
-        </section>
-      </main>
 
-      <footer className="app-footer">
-        <span>Repo Runner</span>
-        <span className="footer-sep">·</span>
-        <a className="footer-link" href="https://github.com/Amarnath10i/repo-runner" target="_blank" rel="noreferrer">
-          GitHub
-        </a>
-      </footer>
+        </main>
+      )}
+
+      {/* Footer only in idle state */}
+      {stage === STAGES.IDLE && (
+        <footer className="app-footer">
+          <span>Repo Runner</span>
+          <span className="footer-sep">·</span>
+          <a className="footer-link" href="https://github.com/Amarnath10i/repo-runner" target="_blank" rel="noreferrer">
+            GitHub
+          </a>
+        </footer>
+      )}
     </div>
   );
 }
