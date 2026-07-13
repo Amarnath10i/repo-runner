@@ -173,39 +173,23 @@ export function canRunNatively(runtimeId) {
 
 /**
  * Wait for a port to become reachable (server startup detection).
+ * Checks both IPv4 and IPv6 via isPortOpen.
  */
 function waitForPort(port, timeoutMs = 30000) {
   return new Promise((resolve, reject) => {
     const start = Date.now();
-    const check = () => {
-      const socket = createConnection({ port, host: '127.0.0.1' }, () => {
-        socket.destroy();
-        resolve();
-      });
-      socket.on('error', () => {
-        if (Date.now() - start > timeoutMs) {
-          reject(new Error(`Timeout waiting for port ${port}`));
-        } else {
-          setTimeout(check, 500);
-        }
-      });
-      socket.setTimeout(500, () => {
-        socket.destroy();
-        if (Date.now() - start > timeoutMs) {
-          reject(new Error(`Timeout waiting for port ${port}`));
-        } else {
-          setTimeout(check, 500);
-        }
-      });
+    const check = async () => {
+      if (await isPortOpen(port)) return resolve();
+      if (Date.now() - start > timeoutMs) return reject(new Error(`Timeout waiting for port ${port}`));
+      setTimeout(check, 500);
     };
     check();
   });
 }
 
-/** Is a TCP port accepting connections on localhost right now? */
-function isPortOpen(port) {
+function tryConnect(port, host) {
   return new Promise((resolve) => {
-    const socket = createConnection({ port, host: '127.0.0.1' }, () => {
+    const socket = createConnection({ port, host }, () => {
       socket.destroy();
       resolve(true);
     });
@@ -215,6 +199,16 @@ function isPortOpen(port) {
       resolve(false);
     });
   });
+}
+
+/**
+ * Is a TCP port accepting connections? Checks both IPv4 (127.0.0.1) and IPv6
+ * (::1) — many dev servers (Vite, etc.) bind only one family, so checking a
+ * single one wrongly reports a running app as crashed.
+ */
+async function isPortOpen(port) {
+  if (await tryConnect(port, '127.0.0.1')) return true;
+  return tryConnect(port, '::1');
 }
 
 // Ports commonly hardcoded by dev servers, tried as a last resort. Excludes the
