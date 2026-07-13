@@ -3,7 +3,7 @@
 // Falls back to Docker sandbox if the runtime isn't installed locally.
 
 import { spawn, execSync } from 'child_process';
-import { join, relative } from 'path';
+import { join, relative, dirname, delimiter } from 'path';
 import { writeFileSync, existsSync, copyFileSync, readdirSync, readFileSync } from 'fs';
 import { createConnection } from 'net';
 import {
@@ -11,6 +11,9 @@ import {
   getProvisionedPythonPath,
   getProvisionedPipPath,
   provisionPython,
+  isGoProvisioned,
+  getProvisionedGoPath,
+  provisionGo,
 } from './auto-provision.js';
 
 // Track active native sessions
@@ -119,7 +122,7 @@ export function checkNativeRuntimes() {
     python: !!python,
     pythonCmd: python,
     pipCmd: pip,
-    go: isCommandAvailable('go'),
+    go: isCommandAvailable('go') || isGoProvisioned(),
     rust: isCommandAvailable('cargo'),
     ruby: isCommandAvailable('ruby'),
     php: isCommandAvailable('php'),
@@ -147,8 +150,9 @@ export function canRunNatively(runtimeId) {
   const runtimes = checkNativeRuntimes();
   const isWin = process.platform === 'win32';
   
-  // Python can be auto-provisioned on Windows, so we say it can run natively
+  // Python and Go can be auto-provisioned on Windows, so they can run natively.
   const canRunPython = runtimes.python || isWin;
+  const canRunGo = runtimes.go || isWin;
 
   const runtimeMap = {
     'python': canRunPython,
@@ -157,7 +161,7 @@ export function canRunNatively(runtimeId) {
     'python-django': canRunPython,
     'python-streamlit': canRunPython,
     'python-gradio': canRunPython,
-    'go': runtimes.go,
+    'go': canRunGo,
     'rust': runtimes.rust,
     'ruby': runtimes.ruby,
     'php': runtimes.php,
@@ -343,6 +347,12 @@ async function installDeps({ runtime, cwd, processEnv, runtimes, onOutput }) {
       break;
     }
     case 'go':
+      // Auto-provision Go if it isn't installed, then put it on PATH.
+      if (!isCommandAvailable('go')) {
+        const goPath = isGoProvisioned() ? getProvisionedGoPath() : await provisionGo(onOutput);
+        processEnv.PATH = `${dirname(goPath)}${delimiter}${processEnv.PATH || process.env.PATH || ''}`;
+        clearRuntimeCache();
+      }
       await spawnWithOutput('go', ['mod', 'download'], { cwd, env: processEnv }, onOutput);
       break;
     case 'rust':

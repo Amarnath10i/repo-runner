@@ -205,6 +205,60 @@ export async function provisionPython(onOutput) {
   }
 }
 
+// ─── Go Provisioning ───
+// Go ships as a self-contained portable archive (no build tools needed), so it
+// auto-provisions cleanly the same way Python does.
+
+const GO_VERSION = '1.23.4';
+const GO_DIR = join(PROVISION_DIR, 'go');
+const GO_MARKER = join(GO_DIR, '.provisioned');
+const GO_URLS = {
+  'win32-x64': `https://go.dev/dl/go${GO_VERSION}.windows-amd64.zip`,
+  'linux-x64': `https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz`,
+  'darwin-x64': `https://go.dev/dl/go${GO_VERSION}.darwin-amd64.tar.gz`,
+  'darwin-arm64': `https://go.dev/dl/go${GO_VERSION}.darwin-arm64.tar.gz`,
+};
+
+export function isGoProvisioned() {
+  return existsSync(GO_MARKER);
+}
+
+/** Path to the provisioned `go` binary (the archive extracts a `go/` folder). */
+export function getProvisionedGoPath() {
+  if (!isGoProvisioned()) return null;
+  const isWin = process.platform === 'win32';
+  return join(GO_DIR, 'go', 'bin', isWin ? 'go.exe' : 'go');
+}
+
+export async function provisionGo(onOutput) {
+  if (isGoProvisioned()) return getProvisionedGoPath();
+
+  const isWin = process.platform === 'win32';
+  const key = `${process.platform}-${process.arch}`;
+  const url = GO_URLS[key];
+  if (!url) throw new Error(`No Go download available for ${key}.`);
+  if (!isWin) {
+    throw new Error('Auto-provisioning Go is currently Windows-only. Install Go: https://go.dev/dl/');
+  }
+
+  onOutput?.(`\n🔵 Go not found — auto-downloading Go ${GO_VERSION}...\n`);
+  mkdirSync(GO_DIR, { recursive: true });
+  const zipPath = join(PROVISION_DIR, `go-${GO_VERSION}.zip`);
+  try {
+    await downloadFile(url, zipPath, onOutput);
+    onOutput?.(`  Extracting Go...\n`);
+    extractZip(zipPath, GO_DIR); // extracts a top-level `go/` folder
+    writeFileSync(GO_MARKER, JSON.stringify({ version: GO_VERSION, provisionedAt: new Date().toISOString() }));
+    try { unlinkSync(zipPath); } catch {}
+    onOutput?.(`\n✅ Go ${GO_VERSION} installed!\n`);
+    return getProvisionedGoPath();
+  } catch (err) {
+    onOutput?.(`\n❌ Failed to provision Go: ${err.message}\n`);
+    try { unlinkSync(zipPath); } catch {}
+    throw err;
+  }
+}
+
 /**
  * Invalidate the runtime cache (call after provisioning).
  */
