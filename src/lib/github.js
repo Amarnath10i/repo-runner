@@ -46,10 +46,27 @@ export async function getDefaultBranch(owner, repo, token) {
   return data.default_branch;
 }
 
-// Fetches the full recursive file tree, then downloads every blob and
-// assembles it into the FileSystemTree shape @webcontainer/api expects:
-// { name: { file: { contents } } | { directory: { ...children } } }
-export async function buildFileSystemTree({ owner, repo, branch, token, onProgress }) {
+// Files whose *contents* the analyzer actually needs (manifests, env examples,
+// build/config files). Everything else only needs its name for detection.
+const KEY_FILENAMES = new Set([
+  'package.json', 'package-lock.json', 'pnpm-lock.yaml', 'yarn.lock',
+  'requirements.txt', 'pyproject.toml', 'Pipfile', 'setup.py', 'environment.yml',
+  'go.mod', 'Cargo.toml', 'composer.json', 'Gemfile', 'pom.xml',
+  'build.gradle', 'build.gradle.kts',
+  '.env.example', '.env.sample', '.env.template',
+  'Dockerfile', 'docker-compose.yml', 'docker-compose.yaml', 'compose.yml',
+  'CMakeLists.txt', 'Makefile', 'tsconfig.json',
+  'vite.config.js', 'vite.config.ts', 'next.config.js', 'next.config.mjs',
+]);
+
+/**
+ * Phase 1: fetch the recursive file list in a single request and build a
+ * skeleton tree (file nodes with `contents: null`), then hydrate only the
+ * manifest/config files the analyzer needs. This is fast even for repos with
+ * hundreds of files — we don't download every blob just to detect the runtime.
+ * Returns { tree, blobs } so a WebContainer run can later hydrate the rest.
+ */
+export async function fetchRepoTree({ owner, repo, branch, token, onProgress }) {
   const treeData = await ghFetch(
     `/repos/${owner}/${repo}/git/trees/${branch}?recursive=1`,
     token
@@ -63,28 +80,61 @@ export async function buildFileSystemTree({ owner, repo, branch, token, onProgre
 
   const blobs = treeData.tree.filter((entry) => entry.type === 'blob');
   const root = {};
-  let done = 0;
+  for (const entry of blobs) {
+    insertIntoTree(root, entry.path.split('/'), null);
+  }
+  onProgress?.(`Fetched file list (${blobs.length} files).`);
 
-  // Fetch blobs in small batches so we don't blow the rate limit / open
-  // connection limit on large repos.
+  // Hydrate only the files analysis needs.
+  const keyBlobs = blobs.filter((b) => KEY_FILENAMES.has(b.path.split('/').pop()));
+  let done = 0;
   const BATCH_SIZE = 8;
-  for (let i = 0; i < blobs.length; i += BATCH_SIZE) {
-    const batch = blobs.slice(i, i + BATCH_SIZE);
+  for (let i = 0; i < keyBlobs.length; i += BATCH_SIZE) {
     await Promise.all(
-      batch.map(async (entry) => {
-        const blob = await ghFetch(
-          `/repos/${owner}/${repo}/git/blobs/${entry.sha}`,
-          token
-        );
-        const contents = decodeBlob(blob);
-        insertIntoTree(root, entry.path.split('/'), contents);
+      keyBlobs.slice(i, i + BATCH_SIZE).map(async (entry) => {
+        const blob = await ghFetch(`/repos/${owner}/${repo}/git/blobs/${entry.sha}`, token);
+        insertIntoTree(root, entry.path.split('/'), decodeBlob(blob));
         done += 1;
-        onProgress?.(`Downloaded ${done}/${blobs.length} files: ${entry.path}`);
+        onProgress?.(`Analyzed ${done}/${keyBlobs.length} manifest file(s).`);
       })
     );
   }
 
-  return root;
+  return { tree: root, blobs };
+}
+
+/**
+ * Phase 2 (WebContainer only): download the contents of every remaining blob
+ * so the tree can be mounted into the in-browser Node sandbox.
+ */
+export async function hydrateAllFiles({ owner, repo, token, tree, blobs, onProgress }) {
+  const pending = blobs.filter((entry) => {
+    const node = getNode(tree, entry.path.split('/'));
+    return !node?.file || node.file.contents === null;
+  });
+
+  let done = 0;
+  const BATCH_SIZE = 8;
+  for (let i = 0; i < pending.length; i += BATCH_SIZE) {
+    await Promise.all(
+      pending.slice(i, i + BATCH_SIZE).map(async (entry) => {
+        const blob = await ghFetch(`/repos/${owner}/${repo}/git/blobs/${entry.sha}`, token);
+        insertIntoTree(tree, entry.path.split('/'), decodeBlob(blob));
+        done += 1;
+        onProgress?.(`Downloaded ${done}/${pending.length} files: ${entry.path}`);
+      })
+    );
+  }
+  return tree;
+}
+
+/**
+ * Back-compat: fetch the full tree with every blob hydrated in one call.
+ */
+export async function buildFileSystemTree(opts) {
+  const { tree, blobs } = await fetchRepoTree(opts);
+  await hydrateAllFiles({ ...opts, tree, blobs });
+  return tree;
 }
 
 function decodeBlob(blob) {
@@ -109,7 +159,26 @@ function insertIntoTree(root, pathParts, contents) {
     node[part] = node[part] || { directory: {} };
     node = node[part].directory;
   }
-  node[pathParts[pathParts.length - 1]] = { file: { contents } };
+  const name = pathParts[pathParts.length - 1];
+  const existing = node[name];
+  // Preserve already-downloaded contents if we're only re-inserting a skeleton.
+  const finalContents =
+    contents !== null && contents !== undefined
+      ? contents
+      : existing?.file?.contents ?? null;
+  // Shape kept minimal ({ file: { contents } }) so it mounts cleanly into a
+  // WebContainer — shas are tracked separately in the `blobs` list.
+  node[name] = { file: { contents: finalContents } };
+}
+
+function getNode(root, pathParts) {
+  let node = root;
+  for (let i = 0; i < pathParts.length - 1; i++) {
+    const child = node[pathParts[i]];
+    if (!child?.directory) return null;
+    node = child.directory;
+  }
+  return node[pathParts[pathParts.length - 1]] || null;
 }
 
 // Scans an already-built tree for likely env var names, by looking at

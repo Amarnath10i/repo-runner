@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, useCallback } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
-import { parseGithubUrl, getDefaultBranch, buildFileSystemTree, detectEnvVars } from './lib/github.js';
+import { parseGithubUrl, getDefaultBranch, fetchRepoTree, hydrateAllFiles, detectEnvVars } from './lib/github.js';
 import { runRepo } from './lib/runner.js';
 import { analyzeRepo } from './lib/ollama.js';
 import { analyzeTreeLocally } from './lib/heuristics.js';
@@ -82,6 +82,8 @@ export default function App() {
   const [executionMode, setExecutionMode] = useState(null); // 'webcontainer' | 'docker' | 'native'
 
   const treeRef = useRef(null);
+  const blobsRef = useRef(null);
+  const repoMetaRef = useRef(null);
   const analysisRef = useRef(null);
   const termRef = useRef(null);
   const termInstance = useRef(null);
@@ -174,9 +176,10 @@ export default function App() {
       const branch = urlBranch || (await getDefaultBranch(owner, repo, token));
       writeLog(`  Branch: \x1b[33m${branch}\x1b[0m\n`);
 
-      // Fetch the tree to analyze
+      // Fetch just the file list + manifest contents to analyze. Full file
+      // contents are only downloaded later if we run in-browser (WebContainer).
       writeLog(`\x1b[1;36m▸ Fetching repository files...\x1b[0m\n`);
-      const tree = await buildFileSystemTree({
+      const { tree, blobs } = await fetchRepoTree({
         owner,
         repo,
         branch,
@@ -184,6 +187,8 @@ export default function App() {
         onProgress: (msg) => writeLog(`  ${msg}\n`),
       });
       treeRef.current = tree;
+      blobsRef.current = blobs;
+      repoMetaRef.current = { owner, repo, branch, token };
 
       // ── Analysis phase ──
       setStage(STAGES.ANALYZING);
@@ -322,8 +327,19 @@ export default function App() {
 
   async function startWebContainerRun(tree, envVars) {
     setStage(STAGES.RUNNING);
-    writeLog(`\n\x1b[1;36m▸ Booting WebContainer sandbox...\x1b[0m\n`);
     try {
+      // Now that we know it's a Node project, download the full file contents
+      // (only the manifests were fetched during analysis).
+      if (blobsRef.current && repoMetaRef.current) {
+        writeLog(`\n\x1b[1;36m▸ Downloading project files...\x1b[0m\n`);
+        await hydrateAllFiles({
+          ...repoMetaRef.current,
+          tree,
+          blobs: blobsRef.current,
+          onProgress: (msg) => writeLog(`  ${msg}\n`),
+        });
+      }
+      writeLog(`\n\x1b[1;36m▸ Booting WebContainer sandbox...\x1b[0m\n`);
       await runRepo({
         tree,
         envVars,
