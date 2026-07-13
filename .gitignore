@@ -4,3 +4,5 @@ dist/
 .runtimes/
 .env
 .DS_Store
+
+.vercel

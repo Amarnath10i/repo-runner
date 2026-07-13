@@ -1,7 +1,13 @@
 # Repo Runner
 
+🚀 **[Live Demo → github-runner-kappa.vercel.app](https://github-runner-kappa.vercel.app)**
+
 **Paste a GitHub URL → get a live demo.** Repo Runner detects a repo's stack,
 installs its dependencies, runs it, and shows a live preview — automatically.
+
+### Deployed on
+- **Frontend**: [Vercel](https://github-runner-kappa.vercel.app)
+- **Backend**: [Railway](https://repo-runner-production.up.railway.app)
 
 ## About
 

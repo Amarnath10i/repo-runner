@@ -65,6 +65,13 @@ const RUNTIME_CONFIGS = [
       let start;
       if (startScript) {
         start = `${manager} run ${startScript}`;
+      } else if (pkg?.workspaces) {
+        // npm workspaces monorepo: install at root, run a runnable workspace
+        // (prefer a frontend so there's a visible preview).
+        const ws = findRunnableWorkspace(dir, pkg);
+        start = ws
+          ? `${manager} run ${ws.script} --workspace ${ws.name}`
+          : `${manager} start`;
       } else {
         const entry = findNodeEntry(dir, pkg);
         start = entry ? `node ${entry}` : `${manager} start`;
@@ -701,6 +708,45 @@ function findNodeEntry(dir, pkg) {
     if (c && existsSync(join(dir, c))) return c;
   }
   return null;
+}
+
+/**
+ * For an npm-workspaces monorepo, pick a runnable workspace — preferring a
+ * frontend (Vite/Next/React) so there's a visible preview. Returns
+ * { name, script } to run as `npm run <script> --workspace <name>`.
+ */
+function findRunnableWorkspace(dir, pkg) {
+  const patterns = Array.isArray(pkg.workspaces)
+    ? pkg.workspaces
+    : pkg.workspaces?.packages || [];
+  const wsDirs = [];
+  for (const pat of patterns) {
+    if (pat.endsWith('/*')) {
+      const base = pat.slice(0, -2);
+      try {
+        for (const e of readdirSync(join(dir, base), { withFileTypes: true })) {
+          if (e.isDirectory()) wsDirs.push(`${base}/${e.name}`);
+        }
+      } catch {
+        // ignore
+      }
+    } else {
+      wsDirs.push(pat);
+    }
+  }
+
+  const FRONTEND_DEPS = ['vite', 'next', 'react-scripts', '@sveltejs/kit', 'nuxt', 'vue', '@angular/core'];
+  const candidates = [];
+  for (const rel of wsDirs) {
+    const wpkg = readJsonSafe(join(dir, rel, 'package.json'));
+    if (!wpkg?.name) continue;
+    const scripts = wpkg.scripts || {};
+    const script = scripts.dev ? 'dev' : scripts.start ? 'start' : scripts.serve ? 'serve' : scripts.preview ? 'preview' : null;
+    if (!script) continue;
+    const deps = { ...(wpkg.dependencies || {}), ...(wpkg.devDependencies || {}) };
+    candidates.push({ name: wpkg.name, script, isFrontend: FRONTEND_DEPS.some((d) => deps[d]) });
+  }
+  return candidates.find((c) => c.isFrontend) || candidates[0] || null;
 }
 
 function readJsonSafe(filePath) {
