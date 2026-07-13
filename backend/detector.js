@@ -576,6 +576,25 @@ const ENV_IGNORE = new Set([
   'GRADIO_SERVER_PORT', 'GRADIO_SERVER_NAME',
 ]);
 
+// Database/connection strings — the user must supply these (they carry creds).
+const DB_CONN_RE = /(MONGO|DATABASE|POSTGRES|POSTGRESQL|MYSQL|MARIADB|REDIS|MSSQL|SQLALCHEMY|DB)[_A-Z0-9]*(URL|URI|CONNECTION|DSN)|CONNECTION[_-]?STRING/i;
+// Plain config the runner can fill or the app defaults: base URLs, host, port.
+const CONFIG_URL_RE = /(_URL|_URI|_ENDPOINT|_HOST|_PORT|BASE[_-]?URL)$|^(NEXT_PUBLIC_|VITE_|REACT_APP_|PUBLIC_)/i;
+// Generic secrets — keys, tokens, passwords.
+const SECRET_RE = /(KEY|TOKEN|SECRET|PASSWORD|PASSWD|PWD|CREDENTIAL|PRIVATE|AUTH|ACCESS[_-]?KEY|CLIENT[_-]?SECRET|API[_-]?KEY|DSN)/i;
+
+/**
+ * Should the user be prompted for this env var? True for secrets/DB URIs the
+ * runner can't know; false for base URLs/host/port config the runner wires up
+ * or the app defaults itself.
+ */
+export function isPromptableSecret(name) {
+  if (DB_CONN_RE.test(name)) return true;     // DB connection string → ask
+  if (CONFIG_URL_RE.test(name)) return false; // base URL / host / port → auto
+  if (SECRET_RE.test(name)) return true;      // API key / token / secret → ask
+  return true;                                // unknown → ask, to be safe
+}
+
 const CODE_EXTS = new Set([
   '.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs',
   '.py', '.go', '.rb', '.php', '.vue', '.svelte', '.astro',

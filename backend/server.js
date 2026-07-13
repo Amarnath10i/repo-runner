@@ -12,7 +12,7 @@ import simpleGit from 'simple-git';
 import { v4 as uuid } from 'uuid';
 import { join } from 'path';
 import { mkdirSync, rmSync, existsSync } from 'fs';
-import { detectRuntime, detectEnvVars, detectEnvVarsFromCode, detectServices } from './detector.js';
+import { detectRuntime, detectEnvVars, detectEnvVarsFromCode, detectServices, isPromptableSecret } from './detector.js';
 import { startSandbox, stopSandbox, getSession, cleanupAll } from './sandbox.js';
 import {
   checkNativeRuntimes,
@@ -116,7 +116,10 @@ app.post('/api/analyze', async (req, res) => {
     const runtime = detectRuntime(repoDir);
     // Env vars from .env.example files AND from what the code actually reads,
     // so required config (DB URIs, API keys) is surfaced for the user to fill.
-    const envVars = [...new Set([...detectEnvVars(repoDir), ...detectEnvVarsFromCode(repoDir)])];
+    // Only prompt for secrets/DB URIs the user must supply; base URLs and other
+    // config are auto-wired by the runner or left to the app's own defaults.
+    const envVars = [...new Set([...detectEnvVars(repoDir), ...detectEnvVarsFromCode(repoDir)])]
+      .filter(isPromptableSecret);
 
     // When the primary runtime needs Docker but a natively-runnable app exists
     // (often in a subfolder), report that as what will actually run.
