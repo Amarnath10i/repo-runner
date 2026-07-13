@@ -121,11 +121,11 @@ export function analyzeTreeLocally(tree) {
   const startScript = pickStartScript(pkg);
   const manager = detectPackageManager(tree, workdir);
 
-  // Some Node frameworks don't run in a browser WebContainer — most notably
-  // Next.js, whose dev server uses Turbopack/SWC native (WASM) bindings that
-  // fail with "turbo.createProject is not supported by the wasm bindings".
-  // Route those to the backend to run on real Node instead.
-  const incompatible = webContainerIncompatibleReason(pkg);
+  // Some Node projects can't run in a browser WebContainer — Next.js (native
+  // Turbopack/SWC WASM bindings) and any package with a native (node-gyp) addon
+  // like bcrypt/sqlite3/canvas. Scan every package.json in the repo (deps may
+  // live in a subfolder), and route those to the backend to run on real Node.
+  const incompatible = treeWebContainerBlocker(tree);
 
   const startCmd = startScript
     ? manager === 'npm'
@@ -179,9 +179,44 @@ export function isPromptableSecret(name) {
   return false;
 }
 
+// Packages with native (node-gyp / prebuilt .node) addons that a browser
+// WebContainer can't load — they must run on real Node.
+const NATIVE_ADDON_DEPS = new Set([
+  'bcrypt', 'sqlite3', 'better-sqlite3', 'canvas', 'sharp', 'node-sass',
+  'grpc', 'robotjs', 'serialport', 'usb', 'node-hid', 'ffi-napi', 'ref-napi',
+  'zeromq', 'leveldown', 'node-gyp', 'bufferutil', 'utf-8-validate', 'sqlite',
+  'puppeteer', 'playwright',
+]);
+
 export function webContainerIncompatibleReason(pkg) {
   const deps = { ...(pkg?.dependencies || {}), ...(pkg?.devDependencies || {}) };
   if (deps.next) return 'Next.js uses native/WASM bindings that break in-browser';
+  const native = Object.keys(deps).find((d) => NATIVE_ADDON_DEPS.has(d));
+  if (native) return `"${native}" is a native module that can't load in a browser sandbox`;
+  return null;
+}
+
+/** Scan every package.json in the tree (root + subfolders) for a blocker. */
+export function treeWebContainerBlocker(tree) {
+  const queue = [tree];
+  while (queue.length) {
+    const node = queue.shift();
+    const pkgNode = node['package.json'];
+    if (pkgNode?.file?.contents) {
+      try {
+        const raw = typeof pkgNode.file.contents === 'string'
+          ? pkgNode.file.contents
+          : new TextDecoder().decode(pkgNode.file.contents);
+        const reason = webContainerIncompatibleReason(JSON.parse(raw));
+        if (reason) return reason;
+      } catch {
+        // ignore unparseable package.json
+      }
+    }
+    for (const [name, child] of Object.entries(node)) {
+      if (!SKIP_DIRS.has(name) && child.directory) queue.push(child.directory);
+    }
+  }
   return null;
 }
 
