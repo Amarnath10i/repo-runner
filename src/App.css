@@ -243,7 +243,7 @@ body {
   display: flex;
   flex-direction: column;
   align-items: center;
-  max-width: 600px;
+  max-width: 750px;
   width: 100%;
   padding: 2rem;
   text-align: center;
@@ -290,13 +290,13 @@ body {
   font-family: 'Great Vibes', cursive;
   font-size: 2.8rem;
   color: rgba(255, 255, 255, 0.35);
-  margin-top: 1.5rem;
+  margin-top: 3rem;
   letter-spacing: 0.12em;
 }
 
 .hero-form {
   width: 100%;
-  max-width: 600px;
+  max-width: 750px;
 }
 
 .hero-input-group {
@@ -324,9 +324,9 @@ body {
   flex: 1;
   background: transparent;
   border: none;
-  padding: 1.25rem 1.5rem;
+  padding: 1.5rem 2rem;
   font-family: var(--font-mono);
-  font-size: 1rem;
+  font-size: 1.1rem;
   color: var(--text-primary);
   outline: none;
 }
@@ -340,15 +340,14 @@ body {
 }
 
 .btn-hero-primary {
-  background: var(--accent-gradient);
-  color: #fff;
+  background: linear-gradient(135deg, var(--accent-cyan) 0%, var(--accent-purple) 100%);
+  color: white;
   border: none;
+  padding: 1.15rem 3rem;
   border-radius: 100px;
-  padding: 0.8rem 2rem;
-  font-family: var(--font-sans);
   font-weight: 700;
-  font-size: 1rem;
-  cursor: pointer;
+  font-size: 1.1rem;
+  letter-spacing: 0.05em;
   transition: transform var(--transition-fast), box-shadow var(--transition-fast);
   box-shadow: 0 4px 15px rgba(123, 154, 255, 0.3);
   white-space: nowrap;
