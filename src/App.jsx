@@ -528,33 +528,16 @@ export default function App() {
 
   return (
     <div className="app">
-      <header className="topbar">
+      <header className="topbar transparent">
         <div className="brand">
-          <div className="brand-mark">GL</div>
           <span className="brand-name">GitLive</span>
         </div>
         
         <div className="topbar-center">
-          {stage !== STAGES.IDLE && (
-            <div className="horizontal-stepper">
-              {PIPELINE_STEPS.map((step, i) => {
-                const idx = stepIndex(step.key);
-                let cls = '';
-                if (stage === STAGES.ERROR && currentStepIdx >= 0 && idx === currentStepIdx) cls = 'error';
-                else if (stage === STAGES.READY && idx <= stepIndex('live')) cls = 'done';
-                else if (currentStepIdx >= 0 && idx < currentStepIdx) cls = 'done';
-                else if (currentStepIdx >= 0 && idx === currentStepIdx) cls = 'active';
-
-                return (
-                  <span key={step.key} style={{ display: 'contents' }}>
-                    {i > 0 && <span className={`step-connector ${cls === 'done' ? 'done' : cls === 'active' ? 'active' : ''}`} />}
-                    <span className={`step-item ${cls}`}>
-                      <span className="step-dot" />
-                      {step.label}
-                    </span>
-                  </span>
-                );
-              })}
+          {stage !== STAGES.IDLE && currentStepIdx >= 0 && (
+            <div className="active-step-only">
+              <span className="step-dot active"></span>
+              {PIPELINE_STEPS[currentStepIdx].label}
             </div>
           )}
         </div>
