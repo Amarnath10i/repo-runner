@@ -380,7 +380,7 @@ body {
 .workspace-layout {
   flex: 1;
   display: flex;
-  flex-direction: row;
+  flex-direction: column;
   position: relative;
   z-index: 1;
   min-height: 0;
@@ -897,23 +897,23 @@ body {
 .terminal-side-panel {
   position: relative;
   background: transparent;
-  border-left: 1px solid var(--border-subtle);
+  border-top: 1px solid var(--border-subtle);
   display: flex;
   flex-direction: column;
-  transition: width var(--transition-spring), min-width var(--transition-spring);
+  transition: height var(--transition-spring), min-height var(--transition-spring);
   z-index: 100;
-  box-shadow: -10px 0 40px rgba(0, 0, 0, 0.5);
-  height: 100%;
+  box-shadow: 0 -10px 40px rgba(0, 0, 0, 0.5);
+  width: 100%;
 }
 
 .terminal-side-panel.open {
-  width: 40vw;
-  min-width: 350px;
+  height: 40vh;
+  min-height: 200px;
 }
 
 .terminal-side-panel.closed {
-  width: 36px;
-  min-width: 36px;
+  height: 40px;
+  min-height: 40px;
   cursor: pointer;
 }
 
@@ -965,17 +965,11 @@ body {
 }
 
 .terminal-side-panel.closed .side-header {
-  flex-direction: column;
-  padding: 1rem 0;
-  height: 100%;
   border-bottom: none;
 }
 
-.terminal-side-panel.closed .side-header-content {
-  writing-mode: vertical-rl;
-  text-orientation: mixed;
-  margin-top: 1rem;
-  transform: rotate(180deg);
+.terminal-side-panel.closed .window-dots {
+  margin-right: 0.4rem;
 }
 
 /* macOS-style window dots */
@@ -998,9 +992,9 @@ body {
 .window-dot.green { background: #2bb87a; }
 
 .terminal-side-panel.closed .window-dots {
-  flex-direction: column;
-  margin-right: 0;
-  margin-bottom: 1rem;
+  flex-direction: row;
+  margin-right: 0.4rem;
+  margin-bottom: 0;
 }
 
 .drawer-content {

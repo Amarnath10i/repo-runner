@@ -703,7 +703,7 @@ export default function App() {
             </div>
             <div className="side-header-right">
               <button className="btn-toggle-side">
-                {isTerminalOpen ? '▶' : '◀'}
+                {isTerminalOpen ? '▼' : '▲'}
               </button>
             </div>
           </div>
