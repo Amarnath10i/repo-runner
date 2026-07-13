@@ -1040,9 +1040,7 @@ body {
   padding: 2rem;
   text-align: center;
   gap: 1rem;
-  background:
-    radial-gradient(circle at 50% 40%, rgba(138, 26, 92, 0.12), transparent 60%),
-    #0d0d12;
+  background: transparent;
 }
 
 .building-state {
