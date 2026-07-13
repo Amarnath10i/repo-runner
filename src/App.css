@@ -227,7 +227,7 @@ body {
   display: flex;
   align-items: center;
   gap: 1rem;
-  margin-bottom: 2.5rem;
+  margin-bottom: 4rem;
 }
 
 .hero-icon {
@@ -235,11 +235,11 @@ body {
 }
 
 .hero-size .brand-git {
-  font-size: 3.5rem;
+  font-size: 5rem;
 }
 
 .hero-size .brand-live {
-  font-size: 5rem;
+  font-size: 6.5rem;
 }
 
 .hero-tagline {
