@@ -545,6 +545,12 @@ body {
   filter: drop-shadow(0 0 22px rgba(200, 116, 255, 0.45));
 }
 
+.loading-calligraphy .dots {
+  display: inline-block;
+  width: 1.4em;      /* reserve space so the word never shifts */
+  text-align: left;
+}
+
 .loading-calligraphy .dots::after {
   content: '';
   -webkit-text-fill-color: #c026d3;
