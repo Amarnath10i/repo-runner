@@ -211,11 +211,11 @@ export default function App() {
     termInstance.current?.write(text.replace(/\n/g, '\r\n'));
   }, []);
 
+  // Refit the terminal whenever the panel opens/closes so content isn't clipped.
   useEffect(() => {
-    if (stage === STAGES.READY) {
-      setIsTerminalOpen(false);
-    }
-  }, [stage]);
+    const id = setTimeout(() => { try { fitAddon.current?.fit(); } catch {} }, 320);
+    return () => clearTimeout(id);
+  }, [isTerminalOpen]);
 
   // ─── Main Flow ───
 
