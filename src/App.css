@@ -522,12 +522,14 @@ body {
 
 .loading-calligraphy {
   font-family: 'Great Vibes', cursive;
-  font-size: clamp(2rem, 4vw, 4rem);
+  font-size: clamp(2.5rem, 5vw, 4.5rem);
   text-align: center;
   padding: 0 2rem;
-  background: linear-gradient(90deg, #cc1a1a, #8a1a5c, #3a1a8a);
+  background: linear-gradient(90deg, #ff5c8a, #c874ff, #6b9bff);
   -webkit-background-clip: text;
+  background-clip: text;
   -webkit-text-fill-color: transparent;
+  filter: drop-shadow(0 0 18px rgba(200, 116, 255, 0.35));
 }
 
 .horizontal-stepper {
