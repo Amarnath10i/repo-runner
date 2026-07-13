@@ -240,6 +240,9 @@ body {
 
 .hero-size .brand-live {
   font-size: 6.5rem;
+  margin-left: -1rem;
+  transform: translateY(2rem);
+  padding-right: 0.5rem; /* Fixes cut-off e in cursive font */
 }
 
 .hero-tagline {
