@@ -522,7 +522,9 @@ body {
 
 .loading-calligraphy {
   font-family: 'Great Vibes', cursive;
-  font-size: 4rem;
+  font-size: clamp(2rem, 4vw, 4rem);
+  text-align: center;
+  padding: 0 2rem;
   background: linear-gradient(90deg, #cc1a1a, #8a1a5c, #3a1a8a);
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
