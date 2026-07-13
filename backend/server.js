@@ -1,4 +1,4 @@
-// Express + WebSocket server for the Repo Runner backend.
+// Express + WebSocket server for the GitLive backend.
 // Handles cloning repos, detecting runtimes, spinning up Docker sandboxes,
 // and streaming terminal output to the frontend via WebSocket.
 
@@ -430,7 +430,7 @@ process.on('SIGTERM', async () => {
 });
 
 server.listen(PORT, () => {
-  console.log(`\n🚀 Repo Runner backend running on http://localhost:${PORT}`);
+  console.log(`\n🚀 GitLive backend running on http://localhost:${PORT}`);
   console.log(`   WebSocket: ws://localhost:${PORT}/ws`);
   console.log(`   Preview proxy: http://localhost:${PORT}/preview/:sessionId\n`);
 });

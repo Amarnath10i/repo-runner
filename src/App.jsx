@@ -530,8 +530,8 @@ export default function App() {
     <div className="app">
       <header className="topbar">
         <div className="brand">
-          <div className="brand-mark">R</div>
-          <span className="brand-name">Repo Runner</span>
+          <div className="brand-mark">GL</div>
+          <span className="brand-name">GitLive</span>
         </div>
         
         <div className="topbar-center">
@@ -751,7 +751,7 @@ export default function App() {
       {/* Footer only in idle state */}
       {stage === STAGES.IDLE && (
         <footer className="app-footer">
-          <span>Repo Runner</span>
+          <span>GitLive</span>
           <span className="footer-sep">·</span>
           <a className="footer-link" href="https://github.com/Amarnath10i/repo-runner" target="_blank" rel="noreferrer">
             GitHub
