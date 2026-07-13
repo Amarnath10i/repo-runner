@@ -62,9 +62,17 @@ const RUNTIME_CONFIGS = [
               ? 'serve'
               : null;
 
+      let start;
+      if (startScript) {
+        start = `${manager} run ${startScript}`;
+      } else {
+        const entry = findNodeEntry(dir, pkg);
+        start = entry ? `node ${entry}` : `${manager} start`;
+      }
+
       return {
         install: `${manager} install`,
-        start: startScript ? `${manager} run ${startScript}` : 'node index.js',
+        start,
         dockerfile: null,
       };
     },
@@ -675,6 +683,25 @@ export function getDockerImage(runtimeId) {
 }
 
 // --- Helpers ---
+
+/**
+ * Find a Node app's real entry file when package.json has no start script.
+ * Prefers package.json "main", then common server/entry filenames — so we
+ * don't blindly run "node index.js" when there is no index.js.
+ */
+function findNodeEntry(dir, pkg) {
+  const candidates = [];
+  if (pkg?.main) candidates.push(pkg.main);
+  candidates.push(
+    'index.js', 'server.js', 'app.js', 'main.js', 'index.mjs', 'index.cjs',
+    'src/index.js', 'src/server.js', 'src/app.js', 'src/main.js',
+    'app/index.js', 'server/index.js', 'bin/www', 'dist/index.js',
+  );
+  for (const c of candidates) {
+    if (c && existsSync(join(dir, c))) return c;
+  }
+  return null;
+}
 
 function readJsonSafe(filePath) {
   try {
