@@ -678,9 +678,7 @@ export default function App() {
           {stage === STAGES.NEEDS_ENV && (
             <div className="modal-overlay">
               <div className="env-form modal-content">
-                <div className="modal-key-icon">🔑</div>
                 <h3>Secrets needed to run this repo</h3>
-                <p className="hint">Only API keys / secrets are asked — everything else is auto-filled. Values stay in memory only.</p>
                 {detectedKeys.map((key) => (
                   <div className="env-row" key={key}>
                     <label htmlFor={`env-${key}`}>{key}</label>
@@ -693,8 +691,8 @@ export default function App() {
                     />
                   </div>
                 ))}
-                <button className="btn-primary" onClick={handleRunWithEnv}>
-                  Run with these values
+                <button className="btn-use-this" onClick={handleRunWithEnv}>
+                  Use this
                 </button>
               </div>
             </div>
