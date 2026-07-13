@@ -33,7 +33,7 @@ export async function getContainer() {
 // package.json before running so a repo whose app is nested in a subfolder — or
 // which has no package.json at all — is handled correctly instead of crashing
 // with a confusing `npm install` ENOENT.
-export async function runRepo({ tree, envVars, analysis, onOutput, onServerReady }) {
+export async function runRepo({ tree, envVars, analysis, onOutput, onServerReady, onExit }) {
   const container = await getContainer();
 
   onOutput('Mounting repo files into the container...\n');
@@ -114,12 +114,12 @@ export async function runRepo({ tree, envVars, analysis, onOutput, onServerReady
   run.exit
     .then((code) => {
       onOutput(`\nProcess exited with code ${code}.\n`);
-      onOutput(
-        'If this is a Next.js/Turbopack repo, WebContainers may fail with: "turbo.createProject is not supported by the wasm bindings".\n'
-      );
+      // The dev server shouldn't exit on its own — if it did, it crashed
+      // (e.g. a native module WebContainers can't load). Signal for fallback.
+      onExit?.(code);
     })
     .catch(() => {
-      // ignore
+      onExit?.(-1);
     });
 
   return { container, process: run };

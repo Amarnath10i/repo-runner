@@ -94,6 +94,7 @@ export default function App() {
   const fitAddon = useRef(null);
   const sessionRef = useRef(null);
   const wsRef = useRef(null);
+  const fellBackRef = useRef(false);
 
   // Check backend availability on mount (with retries for auto-start race condition)
   const refreshBackendStatus = useCallback(async (retries = 1) => {
@@ -228,6 +229,7 @@ export default function App() {
     setExecutionMode(null);
     analysisRef.current = null;
     sessionRef.current = null;
+    fellBackRef.current = false;
     termInstance.current?.clear();
     setStage(STAGES.FETCHING);
 
@@ -387,6 +389,7 @@ export default function App() {
 
   async function startWebContainerRun(tree, envVars) {
     setStage(STAGES.RUNNING);
+    let becameReady = false;
     try {
       // Now that we know it's a Node project, download the full file contents
       // (only the manifests were fetched during analysis).
@@ -406,15 +409,57 @@ export default function App() {
         analysis: analysisRef.current,
         onOutput: writeLog,
         onServerReady: (url) => {
+          becameReady = true;
           setPreviewUrl(url);
           setStage(STAGES.READY);
           writeLog(`\n\x1b[1;32m✓ App is live at ${url}\x1b[0m\n`);
         },
+        // If the in-browser process exits before serving (crash, e.g. a native
+        // module WebContainers can't load), fall back to the native backend.
+        onExit: (code) => {
+          if (!becameReady) fallbackToBackend(envVars, `the in-browser run exited (code ${code})`);
+        },
       });
+    } catch (err) {
+      // Install/boot failed in-browser — try the backend instead of giving up.
+      await fallbackToBackend(envVars, err.message);
+    }
+  }
+
+  // ─── Automatic fallback: WebContainer failed → run on the native backend ───
+  async function fallbackToBackend(envVars, reason) {
+    if (fellBackRef.current) return;
+    fellBackRef.current = true;
+
+    writeLog(`\n\x1b[1;33m⚠ In-browser run didn't work (${reason}).\x1b[0m\n`);
+    const status = await refreshBackendStatus(0);
+    if (!status.serverOnline) {
+      setErrorMsg(`This repo can't run in the browser and no backend is available. (${reason})`);
+      setStage(STAGES.ERROR);
+      return;
+    }
+
+    writeLog(`\x1b[1;36m▸ Retrying on the native backend...\x1b[0m\n`);
+    setStage(STAGES.ANALYZING);
+    try {
+      const backendAnalysis = await analyzeRepoBackend({ repoUrl, token });
+      sessionRef.current = backendAnalysis.sessionId;
+      setRuntimeInfo(backendAnalysis.runtime);
+
+      if (backendAnalysis.nativeAvailable) {
+        setExecutionMode('native');
+        await startNativeRun(backendAnalysis.sessionId, envVars || {});
+      } else if (status.dockerOnline) {
+        setExecutionMode('docker');
+        await startDockerRun(backendAnalysis.sessionId, envVars || {});
+      } else {
+        setErrorMsg(`docker_offline:${backendAnalysis.runtime.label}`);
+        setStage(STAGES.ERROR);
+      }
     } catch (err) {
       setErrorMsg(err.message);
       setStage(STAGES.ERROR);
-      writeLog(`\n\x1b[1;31m✗ Error: ${err.message}\x1b[0m\n`);
+      writeLog(`\n\x1b[1;31m✗ ${err.message}\x1b[0m\n`);
     }
   }
 
