@@ -1,4 +1,4 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Caveat:wght@600;700&family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap');
 
 /* ─── Design Tokens ─── */
 :root {
@@ -100,25 +100,29 @@ body {
 }
 
 .brand-mark {
-  width: 28px;
-  height: 28px;
-  border-radius: 6px;
+  width: 36px;
+  height: 36px;
+  border-radius: 8px;
   background: var(--accent-gradient);
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 0.75rem;
-  font-weight: 800;
+  font-family: 'Caveat', cursive;
+  font-size: 1.5rem;
+  font-weight: 700;
   color: white;
-  opacity: 0.85;
+  opacity: 0.9;
+  text-shadow: 1px 1px 2px rgba(0,0,0,0.3);
 }
 
 .brand-name {
+  font-family: 'Caveat', cursive;
   font-weight: 700;
-  font-size: 1rem;
-  letter-spacing: -0.02em;
+  font-size: 1.8rem;
   color: var(--text-primary);
-  opacity: 0.9;
+  opacity: 0.95;
+  letter-spacing: 0.02em;
+  transform: translateY(2px);
 }
 
 .brand-tag {
@@ -290,7 +294,7 @@ body {
 .workspace-layout {
   flex: 1;
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
   position: relative;
   z-index: 1;
   min-height: 0;
@@ -303,6 +307,7 @@ body {
   display: flex;
   flex-direction: column;
   min-height: 0;
+  min-width: 0; /* Important for flex row */
 }
 
 /* ─── Status Overlay Bar ─── */
@@ -696,50 +701,46 @@ body {
   box-shadow: 0 0 8px rgba(224, 82, 82, 0.4);
 }
 
-/* ─── Terminal Drawer (Bottom) ─── */
-.terminal-drawer {
-  position: absolute;
-  bottom: 0;
-  left: 0;
-  right: 0;
+/* ─── Terminal Side Panel (Right) ─── */
+.terminal-side-panel {
+  position: relative;
   background: rgba(5, 5, 5, 0.95);
   backdrop-filter: blur(24px);
-  border-top: 1px solid var(--border-subtle);
+  border-left: 1px solid var(--border-subtle);
   display: flex;
   flex-direction: column;
-  transition: height var(--transition-spring), transform var(--transition-spring);
+  transition: width var(--transition-spring), min-width var(--transition-spring);
   z-index: 100;
-  box-shadow: 0 -10px 40px rgba(0, 0, 0, 0.5);
+  box-shadow: -10px 0 40px rgba(0, 0, 0, 0.5);
+  height: 100%;
 }
 
-.terminal-drawer.open {
-  height: 40vh;
-  min-height: 200px;
-  transform: translateY(0);
+.terminal-side-panel.open {
+  width: 40vw;
+  min-width: 350px;
 }
 
-.terminal-drawer.closed {
-  height: 36px;
-  transform: translateY(0);
+.terminal-side-panel.closed {
+  width: 36px;
+  min-width: 36px;
+  cursor: pointer;
 }
 
-.drawer-header {
-  height: 36px;
+.side-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0 1rem;
-  cursor: pointer;
+  padding: 0.5rem 1rem;
   background: rgba(255, 255, 255, 0.02);
   border-bottom: 1px solid var(--border-subtle);
   transition: background var(--transition-fast);
 }
 
-.drawer-header:hover {
+.side-header:hover {
   background: rgba(255, 255, 255, 0.05);
 }
 
-.drawer-header-left {
+.side-header-content {
   display: flex;
   align-items: center;
   gap: 0.5rem;
@@ -750,23 +751,40 @@ body {
   color: var(--text-muted);
 }
 
-.drawer-header-right {
+.side-header-right {
   display: flex;
   align-items: center;
 }
 
-.btn-toggle-drawer {
+.btn-toggle-side {
   background: transparent;
   border: none;
   color: var(--text-muted);
-  font-size: 0.7rem;
+  font-size: 0.8rem;
   cursor: pointer;
   padding: 0.2rem;
   transition: color var(--transition-fast);
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
-.drawer-header:hover .btn-toggle-drawer {
+.btn-toggle-side:hover {
   color: var(--text-primary);
+}
+
+.terminal-side-panel.closed .side-header {
+  flex-direction: column;
+  padding: 1rem 0;
+  height: 100%;
+  border-bottom: none;
+}
+
+.terminal-side-panel.closed .side-header-content {
+  writing-mode: vertical-rl;
+  text-orientation: mixed;
+  margin-top: 1rem;
+  transform: rotate(180deg);
 }
 
 /* macOS-style window dots */
@@ -788,20 +806,26 @@ body {
 .window-dot.yellow { background: #d4a020; }
 .window-dot.green { background: #2bb87a; }
 
-.window-dots:hover .window-dot { opacity: 0.7; }
+.terminal-side-panel.closed .window-dots {
+  flex-direction: column;
+  margin-right: 0;
+  margin-bottom: 1rem;
+}
 
 .drawer-content {
   flex: 1;
   display: flex;
   flex-direction: column;
   min-height: 0;
+  min-width: 0;
   opacity: 1;
   transition: opacity 0.2s ease;
 }
 
-.terminal-drawer.closed .drawer-content {
+.terminal-side-panel.closed .drawer-content {
   opacity: 0;
   pointer-events: none;
+  display: none;
 }
 
 .terminal-wrap {

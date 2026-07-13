@@ -502,7 +502,7 @@ export default function App() {
   const isBusy = [STAGES.FETCHING, STAGES.ANALYZING, STAGES.BUILDING, STAGES.RUNNING].includes(stage);
   const currentStep = stageToStep(stage);
   const currentStepIdx = currentStep ? stepIndex(currentStep) : -1;
-  const { percent: progressPct, eta: progressEta } = getProgressDetails(stage);
+  const { progress: progressPct, eta: progressEta } = useSimulatedProgress(stage);
 
   return (
     <div className="app">
@@ -667,10 +667,10 @@ export default function App() {
            )}
         </div>
 
-        {/* Terminal Drawer (Bottom) */}
-        <div className={`terminal-drawer ${isTerminalOpen ? 'open' : 'closed'}`}>
-          <div className="drawer-header" onClick={() => setIsTerminalOpen(!isTerminalOpen)}>
-            <div className="drawer-header-left">
+        {/* Terminal Side Panel (Right) */}
+        <div className={`terminal-side-panel ${isTerminalOpen ? 'open' : 'closed'}`}>
+          <div className="side-header" onClick={() => setIsTerminalOpen(!isTerminalOpen)}>
+            <div className="side-header-content">
               <div className="window-dots">
                 <span className="window-dot red" />
                 <span className="window-dot yellow" />
@@ -678,9 +678,9 @@ export default function App() {
               </div>
               Terminal
             </div>
-            <div className="drawer-header-right">
-              <button className="btn-toggle-drawer">
-                {isTerminalOpen ? '▼' : '▲'}
+            <div className="side-header-right">
+              <button className="btn-toggle-side">
+                {isTerminalOpen ? '▶' : '◀'}
               </button>
             </div>
           </div>
@@ -761,12 +761,42 @@ function StatusDot({ stage }) {
 
 function getProgressDetails(stage) {
   switch (stage) {
-    case STAGES.FETCHING: return { percent: 15, eta: '~ 3s' };
-    case STAGES.ANALYZING: return { percent: 30, eta: '~ 2s' };
-    case STAGES.NEEDS_ENV: return { percent: 30, eta: 'Paused' };
-    case STAGES.BUILDING: return { percent: 60, eta: '~ 30s' };
-    case STAGES.RUNNING: return { percent: 85, eta: '~ 10s' };
+    case STAGES.FETCHING: return { percent: 25, eta: '~ 3s' };
+    case STAGES.ANALYZING: return { percent: 45, eta: '~ 2s' };
+    case STAGES.NEEDS_ENV: return { percent: 45, eta: 'Paused' };
+    case STAGES.BUILDING: return { percent: 75, eta: '~ 30s' };
+    case STAGES.RUNNING: return { percent: 95, eta: '~ 10s' };
     case STAGES.READY: return { percent: 100, eta: 'Done' };
     default: return { percent: 0, eta: '' };
   }
+}
+
+function useSimulatedProgress(stage) {
+  const [progress, setProgress] = useState(0);
+  const [eta, setEta] = useState('');
+
+  useEffect(() => {
+    const details = getProgressDetails(stage);
+    setEta(details.eta);
+
+    if (stage === STAGES.READY || stage === STAGES.ERROR || stage === STAGES.IDLE) {
+      setProgress(details.percent);
+      return;
+    }
+
+    const target = details.percent;
+    const interval = setInterval(() => {
+      setProgress(p => {
+        const diff = target - p;
+        if (diff > 0.1) {
+          return p + Math.max(0.1, diff * 0.05);
+        }
+        return p;
+      });
+    }, 100);
+
+    return () => clearInterval(interval);
+  }, [stage]);
+
+  return { progress, eta };
 }
