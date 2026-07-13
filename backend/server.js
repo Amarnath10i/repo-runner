@@ -257,7 +257,7 @@ app.post('/api/run-native', async (req, res) => {
 
   try {
     const onOutput = (text) => broadcast(sessionId, { type: 'output', text });
-    const { hostPort } = isCompound
+    const { hostPort, failed } = isCompound
       ? await startCompoundNative({ sessionId, repoDir, services, envVars: envVars || {}, onOutput })
       : await startNativeProcess({
           sessionId,
@@ -267,9 +267,17 @@ app.post('/api/run-native', async (req, res) => {
           onOutput,
         });
 
-    // Console programs (C/C++) have no web server / port — the terminal output
-    // is the result, so there's no preview URL.
+    // No port: either a console program (C/C++, expected) or the app failed to
+    // open a web server. Don't show a broken "refused to connect" preview.
     if (!hostPort) {
+      if (failed) {
+        broadcast(sessionId, {
+          type: 'error',
+          message: 'The app started but never opened a web server — it likely crashed. Check the terminal output above for the error.',
+        });
+        res.status(200).json({ ok: false, previewUrl: null, port: null, mode: 'native-failed' });
+        return;
+      }
       broadcast(sessionId, {
         type: 'stage',
         stage: 'ready',

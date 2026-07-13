@@ -731,7 +731,7 @@ export async function startNativeProcess({ sessionId, repoDir, runtime, envVars,
     return { hostPort: readyPort };
   }
   onOutput(`\n[warning] No open port detected — the app may have failed to start (check the logs above).\n`);
-  return { hostPort };
+  return { hostPort: null, failed: true };
 }
 
 /**
@@ -827,8 +827,8 @@ export async function startCompoundNative({ sessionId, repoDir, services, envVar
     onOutput(`\n✅ App is live on port ${readyPort}!\n`);
     return { hostPort: readyPort };
   }
-  onOutput(`\n⚠ Port ${frontPort} not detected — the app may still be starting.\n`);
-  return { hostPort: frontPort };
+  onOutput(`\n⚠ Port ${frontPort} not detected — the app may have failed to start (check the logs above).\n`);
+  return { hostPort: null, failed: true };
 }
 
 /**
