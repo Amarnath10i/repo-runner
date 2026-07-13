@@ -528,7 +528,6 @@ body {
   background: linear-gradient(90deg, #cc1a1a, #8a1a5c, #3a1a8a);
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
-  animation: float-liquid 4s ease-in-out infinite alternate;
 }
 
 .horizontal-stepper {
@@ -590,30 +589,30 @@ body {
 }
 
 .btn-stop-global {
-  background: rgba(248, 113, 113, 0.1);
-  color: #f87171;
-  border: 1px solid rgba(248, 113, 113, 0.2);
-  padding: 0.5rem 1.4rem;
-  border-radius: 8px;
+  background: linear-gradient(135deg, var(--accent-cyan) 0%, var(--accent-purple) 100%);
+  color: white;
+  border: none;
+  padding: 0.6rem 1.8rem;
+  border-radius: 100px;
   font-weight: 700;
-  font-size: 0.9rem;
+  font-size: 0.95rem;
   letter-spacing: 0.05em;
   cursor: pointer;
   display: flex;
   align-items: center;
   gap: 0.6rem;
-  transition: all 0.2s ease;
+  transition: transform var(--transition-fast), box-shadow var(--transition-fast);
+  box-shadow: 0 4px 15px rgba(123, 154, 255, 0.3);
   text-transform: uppercase;
 }
 
 .btn-stop-global:hover {
-  background: rgba(248, 113, 113, 0.25);
-  box-shadow: 0 0 15px rgba(248, 113, 113, 0.4);
-  transform: translateY(-1px);
+  transform: translateY(-1px) scale(1.02);
+  box-shadow: 0 6px 20px rgba(123, 154, 255, 0.5);
 }
 
 .btn-stop-global:active {
-  transform: translateY(0);
+  transform: translateY(0) scale(0.98);
 }
 
 /* ─── Buttons ─── */
