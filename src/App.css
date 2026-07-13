@@ -488,9 +488,6 @@ body {
 .topbar.transparent {
   background: transparent;
   border: none;
-.topbar {
-  background: transparent !important;
-  border: none !important;
 }
 
 .active-step-only {
