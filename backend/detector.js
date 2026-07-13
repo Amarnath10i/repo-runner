@@ -569,6 +569,11 @@ const ENV_IGNORE = new Set([
   'NODE_ENV', 'PORT', 'HOST', 'HOSTNAME', 'PWD', 'HOME', 'PATH', 'CI', 'TZ',
   'PYTHONUTF8', 'PYTHONIOENCODING', 'PYTHONPATH', 'VIRTUAL_ENV',
   'FLASK_RUN_PORT', 'FLASK_RUN_HOST', 'PUBLIC_URL', 'BASE_URL',
+  // Auto-injected by the runner when wiring a monorepo's frontend to its
+  // backend — don't prompt the user for these.
+  'NEXT_PUBLIC_API_URL', 'VITE_API_URL', 'REACT_APP_API_URL',
+  'API_URL', 'API_BASE_URL', 'BACKEND_URL', 'PUBLIC_API_URL',
+  'GRADIO_SERVER_PORT', 'GRADIO_SERVER_NAME',
 ]);
 
 const CODE_EXTS = new Set([
