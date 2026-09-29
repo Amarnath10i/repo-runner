@@ -39,7 +39,6 @@ export function setEngineUrl(url) {
   }
 }
 
-export const connectLocalEngine = () => setEngineUrl(LOCAL_ENGINE);
 
 const wsUrl = () => `${BACKEND_URL.replace(/^http/, 'ws')}/ws`;
 

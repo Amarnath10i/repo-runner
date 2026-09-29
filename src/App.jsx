@@ -18,7 +18,8 @@ import {
   getPreviewUrl,
   checkBackendStatus,
   BACKEND_IS_LOCAL,
-  connectLocalEngine,
+  getEngineUrl,
+  setEngineUrl,
 } from './lib/backend-runner.js';
 
 const STAGES = {
@@ -72,6 +73,25 @@ function normalizeRepoUrl(input) {
 const fullLog = { text: '' };
 if (typeof window !== 'undefined') window.__repoRunnerLog = fullLog;
 
+const TOKEN_KEY = 'repo-runner-github-token';
+
+function readStored(key) {
+  try {
+    return localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function writeStored(key, value) {
+  try {
+    if (value) localStorage.setItem(key, value);
+    else localStorage.removeItem(key);
+  } catch {
+    // storage unavailable (private mode) — keep it for this page only
+  }
+}
+
 const stripAnsi = (s) => s.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '');
 
 function formatElapsed(sec) {
@@ -85,7 +105,8 @@ export default function App() {
   const [repoName, setRepoName] = useState('');
   // Pre-fill the GitHub token from a local .env (VITE_GITHUB_TOKEN) so it
   // doesn't have to be entered every time.
-  const [token] = useState(import.meta.env.VITE_GITHUB_TOKEN || '');
+  const [token, setToken] = useState(() => import.meta.env.VITE_GITHUB_TOKEN || readStored(TOKEN_KEY) || '');
+  const [showToken, setShowToken] = useState(false);
   const [ollamaEndpoint] = useState('http://localhost:11434');
   const [ollamaModel, setOllamaModel] = useState('llama3.1');
   // Auto-enabled when a local Ollama server is detected (no manual toggle).
@@ -797,7 +818,42 @@ export default function App() {
                 {ex.label}
               </button>
             ))}
+            <button
+              type="button"
+              className={`example-chip token-toggle ${token ? 'set' : ''}`}
+              title="GitHub token (optional)"
+              onClick={() => setShowToken((v) => !v)}
+            >
+              <KeyIcon /> {token ? 'Token set' : 'Token'}
+            </button>
           </div>
+
+          {showToken && (
+            <div className="token-box">
+              <input
+                type="password"
+                autoComplete="off"
+                spellCheck="false"
+                placeholder="GitHub token — for private repos or more than 60 runs an hour"
+                value={token}
+                onChange={(e) => {
+                  setToken(e.target.value.trim());
+                  writeStored(TOKEN_KEY, e.target.value.trim());
+                }}
+              />
+              <p>
+                Stays in this browser. A fine-grained token with read-only access is enough —{' '}
+                <a href="https://github.com/settings/personal-access-tokens/new" target="_blank" rel="noreferrer">create one</a>.
+              </p>
+            </div>
+          )}
+
+          {!self.crossOriginIsolated && (
+            <div className="browser-note">
+              This browser can't run Node.js projects in the page (it lacks cross-origin isolation — Safari, for example).
+              Python, Streamlit and static sites still work; for everything, use Chrome, Edge or Firefox.
+            </div>
+          )}
 
           <div className="stack-groups">
             <div className="stack-group">
@@ -851,11 +907,11 @@ export default function App() {
               message={errorMsg}
               kind={errorKind}
               onRetry={() => handleFetchRepo()}
-              onConnect={async () => {
-                connectLocalEngine();
+              onConnect={async (url) => {
+                setEngineUrl(url);
                 const status = await refreshBackendStatus(0);
                 if (status.serverOnline) handleFetchRepo();
-                else writeLog('\n\x1b[33mNo engine answered at http://localhost:3001 — is it running?\x1b[0m\n');
+                else writeLog(`\n\x1b[33mNo engine answered at ${url} — is it running?\x1b[0m\n`);
               }}
               onBack={handleStop}
             />
@@ -1056,6 +1112,7 @@ function ConsolePanel({ done, figures, inputEnabled, awaitingInput, onFocusTermi
 }
 
 function ErrorPanel({ message, kind, onRetry, onConnect, onBack }) {
+  const [engineUrl, setEngineUrlInput] = useState(getEngineUrl() || 'http://localhost:3001');
   if (kind === 'needs-engine') {
     return (
       <div className="error-panel">
@@ -1068,11 +1125,18 @@ function ErrorPanel({ message, kind, onRetry, onConnect, onBack }) {
             <strong>static sites</strong>. Everything else — Java, Go, Rust, C/C++, PHP, Ruby, .NET, and Python
             web servers (Flask, Django, FastAPI, Gradio) — runs on the engine, which installs each language automatically.
           </p>
-          <p className="engine-cmd-label">Start the engine on your computer, then connect:</p>
+          <p className="engine-cmd-label">Start the engine on your computer (or use a deployed one), then connect:</p>
           <code className="engine-cmd">git clone https://github.com/Amarnath10i/repo-runner && cd repo-runner/backend && npm install && npm start</code>
+          <input
+            className="engine-url"
+            value={engineUrl}
+            onChange={(e) => setEngineUrlInput(e.target.value.trim())}
+            spellCheck="false"
+            aria-label="Engine URL"
+          />
         </div>
         <div className="error-actions">
-          <button className="btn-go small" type="button" onClick={onConnect}>Connect local engine</button>
+          <button className="btn-go small" type="button" onClick={() => onConnect(engineUrl.replace(/\/+$/, ''))}>Connect engine</button>
           <button className="btn-ghost" type="button" onClick={onBack}>Back</button>
         </div>
       </div>
@@ -1149,6 +1213,7 @@ const ExternalIcon = () => <svg {...svgProps}><path d="M14 4h6v6M20 4l-9 9M19 14
 const LockIcon = () => <svg {...svgProps} width={12} height={12}><rect x="5" y="11" width="14" height="10" rx="2" /><path d="M8 11V7a4 4 0 0 1 8 0v4" /></svg>;
 const CheckIcon = () => <svg {...svgProps} width={14} height={14} strokeWidth={3}><path d="M5 12l5 5L20 7" /></svg>;
 const TerminalIcon = () => <svg {...svgProps} width={14} height={14}><path d="M4 17l6-5-6-5M12 19h8" /></svg>;
+const KeyIcon = () => <svg {...svgProps} width={13} height={13}><circle cx="8" cy="15" r="4" /><path d="M11 12l9-9M17 6l3 3M15 8l2 2" /></svg>;
 const CopyIcon = () => <svg {...svgProps} width={14} height={14}><rect x="9" y="9" width="11" height="11" rx="2" /><path d="M5 15V5a2 2 0 0 1 2-2h10" /></svg>;
 const ClearIcon = () => <svg {...svgProps} width={14} height={14}><path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14" /></svg>;
 const ServerIcon = () => <svg {...svgProps} width={26} height={26}><rect x="3" y="4" width="18" height="7" rx="2" /><rect x="3" y="13" width="18" height="7" rx="2" /><path d="M7 7.5h.01M7 16.5h.01" /></svg>;
