@@ -449,7 +449,7 @@ async function installDeps({ runtime, cwd, processEnv, onOutput }) {
 
     case 'dotnet':
       fixDotnetGlobalJson(cwd, onOutput);
-      return {};
+      return buildDotnet({ runtime, cwd, opts, onOutput });
 
     case 'cpp':
       return buildCpp({ cwd, opts, onOutput });
@@ -801,13 +801,34 @@ async function installPhp({ runtime, cwd, opts, onOutput }) {
     if (!existsSync(join(cwd, '.env')) && existsSync(join(cwd, '.env.example'))) {
       copyFileSync(join(cwd, '.env.example'), join(cwd, '.env'));
     }
-    const env = readFileSafe(join(cwd, '.env')) || '';
+    let env = readFileSafe(join(cwd, '.env')) || '';
+    const db = join(cwd, 'database', 'database.sqlite');
+    // A MySQL/Postgres config with no password given points at a server that
+    // isn't there — run the demo on SQLite instead.
+    if (/^DB_CONNECTION=(mysql|mariadb|pgsql|sqlsrv)/m.test(env) && /^DB_PASSWORD=\s*$/m.test(env)) {
+      env = env
+        .replace(/^DB_CONNECTION=.*$/m, 'DB_CONNECTION=sqlite')
+        .replace(/^DB_DATABASE=.*$/m, `DB_DATABASE="${db.replace(/\\/g, '/')}"`)
+        .replace(/^(DB_(HOST|PORT|USERNAME|PASSWORD)=.*)$/gm, '# $1');
+      if (!/^DB_DATABASE=/m.test(env)) env += `\nDB_DATABASE="${db.replace(/\\/g, '/')}"\n`;
+      writeFileSync(join(cwd, '.env'), env);
+      onOutput('\n[setup] No database server configured — running on SQLite.\n');
+    }
     if (/^DB_CONNECTION=sqlite/m.test(env) || !/^DB_CONNECTION=/m.test(env)) {
-      const db = join(cwd, 'database', 'database.sqlite');
       if (existsSync(join(cwd, 'database')) && !existsSync(db)) writeFileSync(db, '');
     }
     await spawnWithOutput('php', ['artisan', 'key:generate', '--force'], opts, onOutput);
     await spawnWithOutput('php', ['artisan', 'migrate', '--force'], opts, onOutput);
+    // Blade's @vite / mix() need the frontend assets built, or every page 500s.
+    const pkg = JSON.parse(readFileSafe(join(cwd, 'package.json')) || '{}');
+    const assetScript = pkg.scripts?.build ? 'build' : pkg.scripts?.production ? 'production' : pkg.scripts?.prod ? 'prod' : null;
+    if (assetScript && isCommandAvailable('npm')) {
+      onOutput('\n[build] Building frontend assets...\n');
+      if ((await spawnWithOutput('npm', ['install', '--no-audit', '--no-fund'], opts, onOutput)).code !== 0) {
+        await spawnWithOutput('npm', ['install', '--legacy-peer-deps', '--no-audit', '--no-fund'], opts, onOutput);
+      }
+      await spawnWithOutput('npm', ['run', assetScript], opts, onOutput);
+    }
   }
   return {};
 }
@@ -882,6 +903,23 @@ async function compilePlainJava({ cwd, opts, onOutput }) {
 }
 
 // ── .NET ──
+
+/**
+ * Build to a DLL and run it with `dotnet app.dll`: `dotnet run` launches the
+ * app's own unsigned .exe host, which Windows Smart App Control blocks, while
+ * dotnet.exe is signed by Microsoft.
+ */
+async function buildDotnet({ runtime, cwd, opts, onOutput }) {
+  const project = runtime.project;
+  if (!project) throw new Error('No .NET project file (.csproj) was found.');
+  await mustRun('dotnet', ['build', project, '-c', 'Debug', '-p:UseAppHost=false', '-o', '.rr-out', '--nologo'], opts, onOutput, '.NET build');
+  const assembly = (readFileSafe(join(cwd, project)) || '').match(/<AssemblyName>\s*([^<\s]+)\s*<\/AssemblyName>/)?.[1]
+    || basename(project).replace(/\.(cs|fs|vb)proj$/, '');
+  const dll = join('.rr-out', `${assembly}.dll`);
+  if (!existsSync(join(cwd, dll))) throw new Error(`Built the project, but ${dll} wasn't produced.`);
+  const projectDir = project.includes('/') ? project.slice(0, project.lastIndexOf('/')) : '.';
+  return { dll, contentRoot: join(cwd, projectDir) };
+}
 
 /** A global.json pinning an SDK that isn't installed makes every dotnet command fail. */
 function fixDotnetGlobalJson(cwd, onOutput) {
@@ -1095,10 +1133,11 @@ function buildStartCommand({ runtime, hostPort, processEnv, cwd, prepared = {} }
       processEnv.ASPNETCORE_ENVIRONMENT ||= 'Development'; // most templates only enable Swagger here
       processEnv.DOTNET_NOLOGO = '1';
       processEnv.DOTNET_CLI_TELEMETRY_OPTOUT = '1';
-      const project = runtime.project ? ['--project', runtime.project] : [];
-      // UseAppHost=false: run through dotnet.exe (signed) rather than an unsigned
-      // app .exe, which Windows Smart App Control blocks.
-      return { startCmd: 'dotnet', startArgs: ['run', ...project, '-p:UseAppHost=false', '--urls', `http://127.0.0.1:${port}`] };
+      if (!prepared.dll) throw new Error('The .NET project failed to build — see the errors above.');
+      return {
+        startCmd: 'dotnet',
+        startArgs: [prepared.dll, '--urls', `http://127.0.0.1:${port}`, '--contentRoot', prepared.contentRoot],
+      };
     }
 
     case 'cpp':
@@ -1155,7 +1194,7 @@ const API_URL_ENV_KEYS = [
   'API_URL', 'API_BASE_URL', 'BACKEND_URL', 'PUBLIC_API_URL',
 ];
 
-const SOURCE_SKIP_DIRS = new Set(['.git', 'build', 'bin', 'obj', 'node_modules', '.vscode', 'cmake-build-debug', '.venv', 'venv', 'build-rr', 'target', '.rr-site']);
+const SOURCE_SKIP_DIRS = new Set(['.git', 'build', 'bin', 'obj', 'node_modules', '.vscode', 'cmake-build-debug', '.venv', 'venv', 'build-rr', 'target', '.rr-site', '.rr-out']);
 
 /** Recursively collect source files with the given extensions under `dir`. */
 function collectSources(dir, exts, base = dir, out = []) {

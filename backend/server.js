@@ -206,8 +206,11 @@ app.post('/api/analyze', async (req, res) => {
     // Only prompt for secrets/DB URIs the user must supply; base URLs and other
     // config are auto-wired by the runner or left to the app's own defaults.
     const withDefaults = envKeysWithDefaults(repoDir);
+    // Laravel: the runner generates APP_KEY and falls back to SQLite.
+    const isLaravel = runtime.artisan || runtime.nativeFallback?.artisan;
+    const runnerProvided = (k) => isLaravel && (k === 'APP_KEY' || k.startsWith('DB_'));
     const envVars = [...new Set([...detectEnvVars(repoDir), ...detectEnvVarsFromCode(repoDir)])]
-      .filter((k) => isPromptableSecret(k) && !withDefaults.has(k));
+      .filter((k) => isPromptableSecret(k) && !withDefaults.has(k) && !runnerProvided(k));
 
     // When the primary runtime needs Docker but a natively-runnable app exists
     // (often in a subfolder), report that as what will actually run.
