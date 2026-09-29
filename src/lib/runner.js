@@ -8,6 +8,28 @@ import {
 } from './heuristics.js';
 
 let containerInstance = null;
+// The container outlives a run, so the previous run's process and
+// server-ready listener must be cleaned up before the next one starts.
+let activeRun = { process: null, unsubscribe: null };
+
+/** Stop whatever the last in-browser run started. */
+export function stopActiveRun() {
+  try { activeRun.process?.kill(); } catch {}
+  try { activeRun.unsubscribe?.(); } catch {}
+  activeRun = { process: null, unsubscribe: null };
+}
+
+/** Empty the container's filesystem so a new repo doesn't mix with the last one. */
+export async function clearContainerFs(container) {
+  for (const name of await container.fs.readdir('.')) {
+    await container.fs.rm(name, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+/** Remember a run's process/listener so stopActiveRun() can clean it up. */
+export function trackRun(run) {
+  activeRun = { ...activeRun, ...run };
+}
 
 // Boot is expensive and WebContainer only allows one instance per tab, so we
 // reuse it across runs instead of booting fresh every time.
@@ -35,6 +57,8 @@ export async function getContainer() {
 // with a confusing `npm install` ENOENT.
 export async function runRepo({ tree, envVars, analysis, onOutput, onServerReady, onExit }) {
   const container = await getContainer();
+  stopActiveRun();
+  await clearContainerFs(container);
 
   onOutput('Mounting repo files into the container...\n');
   await container.mount(tree);
@@ -102,13 +126,12 @@ export async function runRepo({ tree, envVars, analysis, onOutput, onServerReady
 
   onOutput(`Starting the app (${startArgv.join(' ')})...\n`);
 
-  container.on('server-ready', (port, url) => {
-    onServerReady(url, port);
-  });
+  trackRun({ unsubscribe: container.on('server-ready', (port, url) => onServerReady(url, port)) });
 
   // If the repo crashes immediately (e.g. Next.js/Turbopack WASM limitations),
   // surface a clearer error instead of leaving the user with a dead terminal.
   const run = await container.spawn(startArgv[0], startArgv.slice(1), spawnOpts(workdir));
+  trackRun({ process: run });
   pipeToOutput(run, onOutput); // don't await — this runs indefinitely
 
   run.exit

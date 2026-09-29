@@ -133,4 +133,8 @@ export default defineConfig({
   optimizeDeps: {
     exclude: ['@webcontainer/api'],
   },
+  // The Python worker loads Pyodide with a dynamic import(), so it must be an ES module.
+  worker: {
+    format: 'es',
+  },
 });
