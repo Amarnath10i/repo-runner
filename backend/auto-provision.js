@@ -97,6 +97,7 @@ const TOOLS = {
   java: jdk(21),
   java17: jdk(17),
   java11: jdk(11),
+  java8: jdk(8),
   maven: {
     label: `Maven ${MAVEN_VERSION}`,
     icon: '☕',

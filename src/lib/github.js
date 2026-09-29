@@ -208,10 +208,15 @@ export function detectEnvVars(tree) {
   return [];
 }
 
+/** Keys the example leaves empty (or as a placeholder) — the ones worth asking for. */
 function parseEnvKeys(contents) {
   return contents
     .split('\n')
     .map((line) => line.trim())
     .filter((line) => line && !line.startsWith('#') && line.includes('='))
-    .map((line) => line.split('=')[0].trim());
+    .filter((line) => {
+      const value = line.slice(line.indexOf('=') + 1).trim().replace(/^["']|["']$/g, '');
+      return !value || /^(your|<|xxx|changeme|replace|todo|\*+$)/i.test(value);
+    })
+    .map((line) => line.split('=')[0].replace(/^export\s+/, '').trim());
 }

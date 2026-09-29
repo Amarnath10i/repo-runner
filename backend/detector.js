@@ -42,7 +42,13 @@ const RUNTIME_CONFIGS = [
     label: 'Node.js',
     icon: '⬢',
     color: '#68a063',
-    detect: (dir) => existsSync(join(dir, 'package.json')),
+    // Laravel, Rails and Django apps often carry a package.json just for their
+    // frontend assets — those are PHP/Ruby/Python apps, not Node ones.
+    detect: (dir) =>
+      existsSync(join(dir, 'package.json')) &&
+      !existsSync(join(dir, 'artisan')) &&
+      !existsSync(join(dir, 'manage.py')) &&
+      !(existsSync(join(dir, 'Gemfile')) && existsSync(join(dir, 'config', 'routes.rb'))),
     getCommands: (dir) => {
       const pkg = readJsonSafe(join(dir, 'package.json'));
       const scripts = pkg?.scripts ?? {};
@@ -623,6 +629,14 @@ export function detectServices(repoDir) {
     return FRONTEND_HINT_DIRS.has(d.toLowerCase()) && existsSync(join(absDir, 'index.html'));
   };
 
+  // A workspaces monorepo (npm/pnpm/yarn/bun) is one project: installed once
+  // at the root, where its dev script starts every package together.
+  const rootPkg = readJsonSafe(join(repoDir, 'package.json'));
+  if (rootPkg?.workspaces || existsSync(join(repoDir, 'pnpm-workspace.yaml'))) {
+    const root = asService('');
+    return root ? [root] : [];
+  }
+
   const subServices = subdirs.filter(isStandalone).map(asService).filter(Boolean);
 
   // In a monorepo where subfolders already provide both a frontend and a
@@ -641,8 +655,22 @@ export function detectServices(repoDir) {
  * and immediate subfolders (so a monorepo's frontend/backend keys are found).
  */
 export function detectEnvVars(repoDir) {
+  const { missing } = scanEnvExamples(repoDir);
+  return [...missing];
+}
+
+/**
+ * Keys that .env.example files give a value for — those need no prompt, since
+ * the runner starts the app with the example's values as defaults.
+ */
+export function envKeysWithDefaults(repoDir) {
+  return scanEnvExamples(repoDir).defaults;
+}
+
+function scanEnvExamples(repoDir) {
   const candidates = ['.env.example', '.env.sample', '.env.template'];
-  const keys = new Set();
+  const missing = new Set();
+  const defaults = new Set();
 
   const dirs = [repoDir];
   try {
@@ -662,13 +690,20 @@ export function detectEnvVars(repoDir) {
           .split('\n')
           .map((l) => l.trim())
           .filter((l) => l && !l.startsWith('#') && l.includes('='))
-          .forEach((l) => keys.add(l.split('=')[0].trim()));
+          .forEach((l) => {
+            const key = l.split('=')[0].replace(/^export\s+/, '').trim();
+            const value = l.slice(l.indexOf('=') + 1).trim().replace(/^["']|["']$/g, '');
+            // Placeholders like "your-api-key" or "<token>" still need a real value.
+            if (value && !/^(your|<|xxx|changeme|replace|todo|\*+$)/i.test(value)) defaults.add(key);
+            else missing.add(key);
+          });
       } catch {
         // ignore unreadable files
       }
     }
   }
-  return [...keys];
+  for (const k of defaults) missing.delete(k);
+  return { missing, defaults };
 }
 
 // Ways code reads an env var, across JS/TS/Bun/Vite and Python.

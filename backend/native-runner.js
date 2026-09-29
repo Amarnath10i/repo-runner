@@ -161,6 +161,7 @@ function toolsForRun(runtime, cwd) {
     const wrapper = readGradleWrapperVersion(cwd);
     if (wrapper === null) tools.push(['gradle', 'gradle']);
     // Gradle only runs on JDKs it knows: < 7.3 → 11, < 8.5 → 17.
+    else if (wrapper < 500) tools = [['java8', 'javac']]; // Gradle 4 and older can't parse Java 11+ versions
     else if (wrapper < 703) tools = [['java11', 'javac']];
     else if (wrapper < 805) tools = [['java17', 'javac']];
   }
@@ -213,7 +214,8 @@ function applyToolEnv(processEnv, { pathDirs, vars }) {
  */
 async function prepareToolchain({ runtime, cwd, processEnv, onOutput }) {
   for (const [tool, cmd] of toolsForRun(runtime, cwd)) {
-    if (isCommandAvailable(cmd) && !tool?.startsWith('java1')) continue;
+    // A specific JDK (java8/11/17) is always provisioned: the system one may be too new.
+    if (isCommandAvailable(cmd) && !/^java\d/.test(tool || '')) continue;
     if (!tool || !canProvision(tool)) {
       throw new Error(`${runtime.label} needs "${cmd}", which isn't installed and can't be auto-installed on this OS. Install it and try again.`);
     }
@@ -1040,6 +1042,14 @@ function buildStartCommand({ runtime, hostPort, processEnv, cwd, prepared = {} }
 
     case 'node': {
       processEnv.BROWSER = 'none'; // create-react-app would open a browser tab
+      // webpack 4-era tooling crashes on Node 17+ (ERR_OSSL_EVP_UNSUPPORTED)
+      // unless the legacy OpenSSL provider is on.
+      const pkg = JSON.parse(readFileSafe(join(cwd, 'package.json')) || '{}');
+      const deps = { ...(pkg.dependencies || {}), ...(pkg.devDependencies || {}) };
+      const major = (name) => Number(deps[name]?.match(/(\d+)/)?.[1]);
+      if (major('react-scripts') < 5 || major('@vue/cli-service') < 5 || major('next') < 12 || major('webpack') < 5) {
+        processEnv.NODE_OPTIONS = [processEnv.NODE_OPTIONS, '--openssl-legacy-provider'].filter(Boolean).join(' ');
+      }
       const [first, ...rest] = (runtime.start || 'npm start').split(' ');
       const cmd = ['npm', 'pnpm', 'yarn', 'bun'].includes(first) ? nodeManagerCommand(first) : [first];
       return { startCmd: cmd[0], startArgs: [...cmd.slice(1), ...rest] };
@@ -1086,7 +1096,9 @@ function buildStartCommand({ runtime, hostPort, processEnv, cwd, prepared = {} }
       processEnv.DOTNET_NOLOGO = '1';
       processEnv.DOTNET_CLI_TELEMETRY_OPTOUT = '1';
       const project = runtime.project ? ['--project', runtime.project] : [];
-      return { startCmd: 'dotnet', startArgs: ['run', ...project, '--urls', `http://127.0.0.1:${port}`] };
+      // UseAppHost=false: run through dotnet.exe (signed) rather than an unsigned
+      // app .exe, which Windows Smart App Control blocks.
+      return { startCmd: 'dotnet', startArgs: ['run', ...project, '-p:UseAppHost=false', '--urls', `http://127.0.0.1:${port}`] };
     }
 
     case 'cpp':
@@ -1114,12 +1126,26 @@ function readFileSafe(filePath) {
 }
 
 /** Write user-provided env vars to a .env file in `cwd` (if any). */
+/**
+ * Write .env: start from the repo's .env.example (its defaults are why we
+ * didn't prompt for those keys), then apply the values the user entered.
+ */
 function writeEnvFile(cwd, envVars, onOutput) {
-  if (envVars && Object.keys(envVars).length > 0) {
-    const content = Object.entries(envVars).map(([k, v]) => `${k}=${v}`).join('\n');
-    writeFileSync(join(cwd, '.env'), content);
-    onOutput(`Wrote .env with ${Object.keys(envVars).length} variable(s)\n`);
+  const given = Object.entries(envVars || {}).filter(([, v]) => v !== '');
+  const envPath = join(cwd, '.env');
+  const example = ['.env.example', '.env.sample', '.env.template'].map((f) => join(cwd, f)).find(existsSync);
+  if (!given.length && (existsSync(envPath) || !example)) return;
+
+  const lines = existsSync(envPath) ? readFileSafe(envPath).split(/\r?\n/) : example ? readFileSafe(example).split(/\r?\n/) : [];
+  for (const [key, value] of given) {
+    const i = lines.findIndex((l) => new RegExp(`^\\s*(export\\s+)?${key}\\s*=`).test(l));
+    if (i >= 0) lines[i] = `${key}=${value}`;
+    else lines.push(`${key}=${value}`);
   }
+  writeFileSync(envPath, lines.join('\n'));
+  onOutput(example && !given.length
+    ? `Created .env from ${example.split(/[\\/]/).pop()}\n`
+    : `Wrote .env with ${given.length} value(s)\n`);
 }
 
 // Common env var names frameworks use to locate their API/backend, so a

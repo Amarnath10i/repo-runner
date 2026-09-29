@@ -525,7 +525,14 @@ export default function App() {
         // If the in-browser process exits before serving, fall back to the engine.
         onExit: (code) => {
           setInputTarget(null);
-          if (!becameReady) fallbackToBackend(envVars, `the in-browser run exited (code ${code})`);
+          if (!becameReady) {
+            fallbackToBackend(envVars, `the in-browser run exited (code ${code})`);
+          } else if (code !== 0) {
+            // The dev server listened, then crashed (e.g. while compiling):
+            // don't leave a dead preview on screen.
+            setPreviewUrl('');
+            fail(`The app crashed after starting (exit code ${code}) — the terminal shows why.`);
+          }
         },
       });
       const writer = proc.input.getWriter();

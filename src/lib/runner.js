@@ -82,19 +82,32 @@ export async function runRepo({ tree, envVars, analysis, onOutput, onServerReady
     onOutput(`Node project found in "${workdir}/" — installing and starting there.\n`);
   }
 
-  // Write .env into the project's own directory, not blindly at the root.
-  if (envVars && Object.keys(envVars).length > 0) {
-    const envContent = Object.entries(envVars)
-      .map(([k, v]) => `${k}=${v}`)
-      .join('\n');
-    const envPath = workdir ? `${workdir}/.env` : '.env';
-    await container.fs.writeFile(envPath, envContent);
-    onOutput(`Wrote ${envPath} with provided values.\n`);
+  // Write .env into the project's own directory: the .env.example defaults
+  // (why those keys weren't prompted for) plus the values the user entered.
+  const envPath = joinPath(workdir, '.env');
+  const given = Object.entries(envVars || {}).filter(([, v]) => v !== '');
+  const hasEnv = await container.fs.readFile(envPath, 'utf-8').then(() => true, () => false);
+  let example = null;
+  for (const name of ['.env.example', '.env.sample', '.env.template']) {
+    example = await container.fs.readFile(joinPath(workdir, name), 'utf-8').catch(() => null);
+    if (example !== null) break;
+  }
+  if (given.length || (!hasEnv && example !== null)) {
+    const lines = hasEnv ? (await container.fs.readFile(envPath, 'utf-8')).split(/\r?\n/) : (example || '').split(/\r?\n/);
+    for (const [key, value] of given) {
+      const i = lines.findIndex((l) => new RegExp(`^\\s*(export\\s+)?${key}\\s*=`).test(l));
+      if (i >= 0) lines[i] = `${key}=${value}`;
+      else lines.push(`${key}=${value}`);
+    }
+    await container.fs.writeFile(envPath, lines.join('\n'));
+    onOutput(`Wrote ${envPath}${given.length ? ` with ${given.length} value(s)` : ' from the example file'}.\n`);
   }
 
   const pkg = readPackageJsonAt(tree, workdir);
 
   const hasNext = Boolean(pkg?.dependencies?.next || pkg?.devDependencies?.next);
+  legacyOpenssl = needsLegacyOpenssl(pkg);
+  if (legacyOpenssl) onOutput('Older webpack tooling: enabling Node\'s legacy OpenSSL provider.\n');
   const nextDevFallback = hasNext ? ['npx', 'next', 'dev'] : null;
 
   const installArgv = analysis?.installCmd ? splitCommand(analysis.installCmd) : ['npm', 'install'];
@@ -148,8 +161,22 @@ export async function runRepo({ tree, envVars, analysis, onOutput, onServerReady
 // BROWSER=none: create-react-app & co. would otherwise try to open a tab.
 const SANDBOX_ENV = { BROWSER: 'none' };
 
+/**
+ * webpack 4-era tooling (react-scripts < 5, Vue CLI < 5, Next < 12, webpack
+ * < 5) uses a hash Node 17+ disables — it crashes with ERR_OSSL_EVP_UNSUPPORTED
+ * unless the legacy OpenSSL provider is enabled.
+ */
+export function needsLegacyOpenssl(pkg) {
+  const deps = { ...(pkg?.dependencies || {}), ...(pkg?.devDependencies || {}) };
+  const major = (name) => Number(deps[name]?.match(/(\d+)/)?.[1]);
+  return major('react-scripts') < 5 || major('@vue/cli-service') < 5 || major('next') < 12 || major('webpack') < 5;
+}
+
+let legacyOpenssl = false;
+
 function spawnOpts(workdir) {
-  return { ...(workdir ? { cwd: workdir } : {}), env: SANDBOX_ENV };
+  const env = legacyOpenssl ? { ...SANDBOX_ENV, NODE_OPTIONS: '--openssl-legacy-provider' } : SANDBOX_ENV;
+  return { ...(workdir ? { cwd: workdir } : {}), env };
 }
 
 const joinPath = (dir, file) => (dir ? `${dir}/${file}` : file);
