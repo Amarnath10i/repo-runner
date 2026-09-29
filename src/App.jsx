@@ -45,7 +45,7 @@ const STEPS = [
 // step runs so long installs still show movement.
 const STEP_PROGRESS = { fetch: [4, 18], detect: [18, 30], install: [30, 78], start: [78, 94], live: [100, 100] };
 
-const IN_BROWSER_STACKS = ['Node.js', 'Python', 'Streamlit', 'Notebooks', 'Static sites'];
+const IN_BROWSER_STACKS = ['Node.js', 'Python', 'Streamlit', 'Notebooks', 'HF pipelines (WebGPU)', 'Static sites'];
 const ENGINE_STACKS = ['Java', 'Go', 'Rust', 'C / C++', 'PHP', 'Ruby', '.NET', 'Django', 'Flask', 'FastAPI', 'Gradio'];
 
 const EXAMPLES = [
@@ -495,6 +495,7 @@ export default function App() {
       tree,
       entry: plan.entry,
       mode: plan.kind === 'python-notebook' ? 'notebook' : 'script',
+      hfBridge: !!plan.hfBridge,
       onOutput: writeLog,
       onFigure: (src) => setFigures((f) => [...f, src]),
       onStatus: (text) => {

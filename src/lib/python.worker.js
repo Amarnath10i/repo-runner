@@ -174,6 +174,96 @@ async def rr_run_notebook(cells):
     return 0
 `;
 
+// ─── Hugging Face bridge ───
+// Scripts that only use `transformers.pipeline(...)` get a stand-in
+// `transformers` module backed by Transformers.js: the same task runs on an
+// ONNX version of the model, on the visitor's GPU (WebGPU) or CPU (WASM).
+
+// jsDelivr's +esm build resolves the package's bare imports (onnxruntime-web) to CDN URLs.
+const TRANSFORMERS_JS = 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.3.0/+esm';
+let transformersJs = null;
+
+async function hfDevice() {
+  try {
+    if (self.navigator?.gpu && (await self.navigator.gpu.requestAdapter())) return 'webgpu';
+  } catch {
+    // no usable GPU
+  }
+  return 'wasm';
+}
+
+/** Hub ids to try: the name as given, then the common ONNX conversions of it. */
+function onnxCandidates(model) {
+  if (!model) return [undefined];
+  const base = model.split('/').pop();
+  return [...new Set([model, `Xenova/${base}`, `onnx-community/${base}`])];
+}
+
+self.rrHfPipeline = async (task, model) => {
+  transformersJs ||= await import(/* @vite-ignore */ TRANSFORMERS_JS);
+  const preferred = await hfDevice();
+  let lastProgress = 0;
+  const progress_callback = (p) => {
+    if (p.status === 'progress' && p.progress - lastProgress >= 20) {
+      lastProgress = p.progress;
+      post('stdout', { text: `  Downloading ${p.file}… ${Math.round(p.progress)}%\n` });
+    }
+  };
+  let lastError;
+  for (const device of preferred === 'webgpu' ? ['webgpu', 'wasm'] : ['wasm']) {
+    for (const id of onnxCandidates(model)) {
+      try {
+        const where = device === 'webgpu' ? 'your GPU (WebGPU)' : 'the CPU (WebAssembly)';
+        post('stdout', { text: `\x1b[36m▸ ${task}${id ? ` · ${id}` : ''} — Transformers.js on ${where}\x1b[0m\n` });
+        return await transformersJs.pipeline(task, id, { device, progress_callback });
+      } catch (err) {
+        lastError = err;
+      }
+    }
+  }
+  throw new Error(`No ONNX version of ${model || `the default ${task} model`} could be loaded (${lastError?.message || lastError}).`);
+};
+
+self.rrHfCall = async (pipe, inputs, options) => {
+  const out = await pipe(inputs, options);
+  return typeof out?.tolist === 'function' ? out.tolist() : out; // Tensors → nested lists
+};
+
+const HF_SHIM = String.raw`
+import sys, types, importlib.machinery, js
+from pyodide.ffi import run_sync, to_js
+
+def _to_js(value):
+    return to_js(value, dict_converter=js.Object.fromEntries)
+
+class Pipeline:
+    def __init__(self, task, model=None):
+        self.task, self.model = task, model
+        self._pipe = run_sync(js.rrHfPipeline(task, model))
+
+    def __call__(self, inputs, *args, **kwargs):
+        kwargs.pop("device", None)
+        result = run_sync(js.rrHfCall(self._pipe, _to_js(inputs), _to_js(kwargs)))
+        return result.to_py() if hasattr(result, "to_py") else result
+
+    def __repr__(self):
+        return f"<Transformers.js pipeline task={self.task!r} model={self.model!r}>"
+
+def pipeline(task=None, model=None, *args, **kwargs):
+    if task is None:
+        raise ValueError("pipeline() needs a task name when running in the browser")
+    return Pipeline(task, model)
+
+_mod = types.ModuleType("transformers")
+_mod.__spec__ = importlib.machinery.ModuleSpec("transformers", None)
+_mod.__version__ = "transformers.js"
+_mod.pipeline, _mod.Pipeline = pipeline, Pipeline
+sys.modules["transformers"] = _mod
+`;
+
+// Packages the bridge replaces — installing them in Pyodide would fail or be pointless.
+const HF_BRIDGED = /^(torch|torchvision|torchaudio|transformers|tensorflow|tensorflow-cpu|accelerate|sentencepiece|tokenizers|safetensors|huggingface[-_]hub|optimum|onnxruntime)$/i;
+
 // Import names whose pip package is named differently.
 const IMPORT_TO_PIP = {
   cv2: 'opencv-python', PIL: 'pillow', sklearn: 'scikit-learn', skimage: 'scikit-image',
@@ -198,7 +288,7 @@ function notebookCells(json, pipInstalls) {
     .filter((src) => src.trim());
 }
 
-async function run({ files, entry, mode, requirements, stdinBuffer }) {
+async function run({ files, entry, mode, requirements, stdinBuffer, hfBridge }) {
   post('status', { text: 'Loading Python (Pyodide)…' });
   post('stdout', { text: `\x1b[36m▸ Starting Python in your browser (Pyodide ${PYODIDE_VERSION})…\x1b[0m\n` });
   const { loadPyodide } = await import(/* @vite-ignore */ `${INDEX_URL}pyodide.mjs`);
@@ -238,10 +328,14 @@ async function run({ files, entry, mode, requirements, stdinBuffer }) {
   await pyodide.runPythonAsync(DRIVER);
   const g = pyodide.globals;
   const toPy = (v) => pyodide.toPy(v);
+  if (hfBridge) {
+    await pyodide.runPythonAsync(HF_SHIM);
+    post('stdout', { text: '  transformers → Transformers.js (ONNX models, WebGPU when available)\n' });
+  }
 
-  const wanted = [...new Set([...requirements, ...pipInstalls])];
+  const wanted = [...new Set([...requirements, ...pipInstalls])].filter((p) => !(hfBridge && HF_BRIDGED.test(p)));
   if (wanted.length) await g.get('rr_install')(toPy(wanted));
-  const missing = g.get('rr_missing_imports')(toPy(chunks)).toJs();
+  const missing = g.get('rr_missing_imports')(toPy(chunks)).toJs().filter((m) => !(hfBridge && HF_BRIDGED.test(m)));
   if (missing.length) {
     const pkgs = missing.map((m) => IMPORT_TO_PIP[m] || m);
     post('stdout', { text: `  Also installing imported packages: ${pkgs.join(', ')}\n` });
@@ -257,5 +351,14 @@ async function run({ files, entry, mode, requirements, stdinBuffer }) {
     return await g.get('rr_run_notebook')(toPy(cells));
   }
   post('stdout', { text: `\x1b[32m▸ Running ${entry}\x1b[0m\n\n` });
-  return g.get('rr_run_script')(entry);
+  const runScript = g.get('rr_run_script');
+  if (hfBridge) {
+    // pipeline() waits on Transformers.js with run_sync, which needs the
+    // Python call to run with stack switching (JSPI).
+    if (typeof runScript.callPromising !== 'function' || !('Suspending' in WebAssembly)) {
+      throw new Error("This browser can't run Hugging Face models from Python yet — use a current Chrome or Edge.");
+    }
+    return await runScript.callPromising(entry);
+  }
+  return runScript(entry);
 }

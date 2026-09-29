@@ -39,6 +39,18 @@ const PY_WEB_SERVERS = /^(gradio|flask|django|fastapi|uvicorn|aiohttp|tornado|bo
 // Deep-learning stacks have no WebAssembly builds for Pyodide.
 const PY_HEAVY_ML = /^(torch|tensorflow|tensorflow-cpu|keras|jax|transformers|diffusers|sentence-transformers|ultralytics|accelerate|onnxruntime|llama-cpp-python|vllm|langchain|llama-index|openai-whisper|spacy)\b/im;
 const PY_HEAVY_ML_IMPORT = /^\s*(?:import|from)\s+(torch|tensorflow|keras|jax|transformers|diffusers|sentence_transformers|ultralytics|whisper|langchain|llama_index|spacy)\b/m;
+/**
+ * Does this script use Transformers only through `pipeline(...)`, with no
+ * direct PyTorch/TensorFlow/model-class code or UI server? Those calls can be
+ * served by Transformers.js in the browser.
+ */
+export function usesOnlyHfPipelines(code) {
+  if (!/^\s*from\s+transformers\s+import\s+\(?\s*pipeline\s*\)?\s*$/m.test(code) && !/\btransformers\.pipeline\s*\(/.test(code)) return false;
+  if (/^\s*from\s+transformers\s+import\s+(?!\(?\s*pipeline\s*\)?\s*$)/m.test(code)) return false; // AutoModel, Trainer, …
+  if (/^\s*(?:import|from)\s+(torch|tensorflow|keras|jax|diffusers|sentence_transformers|gradio|streamlit|flask|fastapi)\b/m.test(code)) return false;
+  return true;
+}
+
 // Desktop GUI toolkits have no window to draw into in a browser.
 const PY_DESKTOP_GUI = /^\s*(?:import|from)\s+(tkinter|pygame|PyQt[56]|PySide[26]|wx|kivy|customtkinter|turtle|pyautogui)\b/m;
 
@@ -67,6 +79,19 @@ export function planBrowserRun(tree, stack) {
 
   if (stack === 'python' || (stack === 'unknown' && files.some((f) => f.endsWith('.py') || f.endsWith('.ipynb')))) {
     const rootCode = files.filter((f) => !f.includes('/') && f.endsWith('.py')).map((f) => readText(tree, f) || '').join('\n');
+    // Scripts that only use Hugging Face pipelines run on the visitor's GPU
+    // through Transformers.js (ONNX + WebGPU) — even if requirements list torch.
+    const scriptEntry = pickPythonEntry(tree, files, []);
+    const entryCode = scriptEntry ? readText(tree, scriptEntry) || '' : '';
+    if (usesOnlyHfPipelines(entryCode)) {
+      return {
+        kind: 'python-script',
+        label: 'Python + Transformers.js',
+        entry: scriptEntry,
+        hfBridge: true,
+        reason: 'Hugging Face pipelines run in your browser with Transformers.js (ONNX on your GPU via WebGPU, or the CPU).',
+      };
+    }
     const heavy = (manifests.match(PY_HEAVY_ML) || rootCode.match(PY_HEAVY_ML_IMPORT))?.[1];
     if (heavy) {
       return { kind: null, reason: `This project uses ${heavy}, which can't run in a browser tab — it needs the runner engine (CPU builds are installed automatically).` };

@@ -28,7 +28,7 @@ function repoFiles(tree) {
  * Run a Python script or notebook in a Pyodide worker. Returns controls:
  * { sendInput(line), stop() }. Output arrives through the callbacks.
  */
-export function runPythonInBrowser({ tree, entry, mode, onOutput, onFigure, onStatus, onInputRequest, onDone }) {
+export function runPythonInBrowser({ tree, entry, mode, hfBridge = false, onOutput, onFigure, onStatus, onInputRequest, onDone }) {
   const worker = new Worker(new URL('./python.worker.js', import.meta.url), { type: 'module' });
 
   // input() support: the worker blocks on this buffer until a line arrives.
@@ -80,7 +80,7 @@ export function runPythonInBrowser({ tree, entry, mode, onOutput, onFigure, onSt
   };
 
   const requirements = parseRequirements(readText(tree, 'requirements.txt'));
-  worker.postMessage({ type: 'run', files: repoFiles(tree), entry, mode, requirements, stdinBuffer });
+  worker.postMessage({ type: 'run', files: repoFiles(tree), entry, mode, requirements, stdinBuffer, hfBridge });
 
   return {
     sendInput(line) {

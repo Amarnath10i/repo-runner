@@ -16,6 +16,7 @@ Many repos run **entirely in your browser**, with no server at all:
 | Python scripts | Pyodide (Python in WebAssembly) — `input()` works in the terminal |
 | Jupyter notebooks | Run top to bottom in Pyodide; matplotlib figures are shown |
 | Streamlit | stlite (Streamlit on Pyodide) |
+| Hugging Face `pipeline(...)` scripts | Transformers.js — ONNX models on your GPU (WebGPU) or CPU |
 | Anything else | A browsable file listing with the README |
 
 Everything else runs on the **runner engine** (`backend/`), which installs each
