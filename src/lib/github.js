@@ -1,10 +1,13 @@
-// All calls go directly to api.github.com from the browser (it supports CORS
-// for public GET requests), so no backend server is needed for this MVP.
-// NOTE: unauthenticated requests are capped at 60/hour per IP by GitHub.
-// Pass a personal access token (read-only, "public_repo" scope) via the UI
-// to raise that limit to 5,000/hour if you hit it.
+// GitHub API calls go straight from the browser (it supports CORS). A run
+// costs one API call — file contents come from raw.githubusercontent.com.
+// Without a token GitHub allows 60 calls/hour per visitor; if that runs out,
+// calls are retried through the site's /api/github proxy (a Vercel function
+// that uses the deployment's own GITHUB_TOKEN), when one is deployed.
 
 const API = 'https://api.github.com';
+const PROXY = '/api/github';
+
+export class RateLimitError extends Error {}
 
 export function parseGithubUrl(input) {
   // Drop ?tab=readme-ov-file, #readme and a trailing slash or .git — all common
@@ -22,21 +25,49 @@ export function parseGithubUrl(input) {
   return { owner, repo, branch: branch ? decodeURIComponent(branch) : null };
 }
 
+const isRateLimited = (res) =>
+  res.status === 429 || (res.status === 403 && res.headers.get('x-ratelimit-remaining') === '0');
+
+/** The deployment's /api/github proxy, if there is one (else null). */
+async function viaProxy(path) {
+  try {
+    const res = await fetch(`${PROXY}${path}`, { headers: { Accept: 'application/vnd.github+json' } });
+    // No proxy deployed (e.g. the dev server answers with index.html).
+    if (!(res.headers.get('content-type') || '').includes('json')) return null;
+    return res;
+  } catch {
+    return null;
+  }
+}
+
 async function ghFetch(path, token) {
-  const res = await fetch(`${API}${path}`, {
-    headers: {
-      Accept: 'application/vnd.github+json',
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-    },
-  });
+  let res;
+  try {
+    res = await fetch(`${API}${path}`, {
+      headers: {
+        Accept: 'application/vnd.github+json',
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+    });
+  } catch {
+    throw new Error("Couldn't reach GitHub — check your internet connection.");
+  }
+  if (!token && isRateLimited(res)) res = (await viaProxy(path)) || res;
   if (!res.ok) {
-    if (res.status === 403) {
-      throw new Error(
-        'GitHub API rate limit hit (60 requests/hour without a token). Add a personal access token in the settings panel to raise this to 5,000/hour.'
+    if (isRateLimited(res) || res.status === 403) {
+      throw new RateLimitError(
+        token
+          ? 'GitHub rate limit reached for this token. Try again in a while.'
+          : 'GitHub allows 60 requests an hour without a token, and that limit is used up. Add a GitHub token (the key button under the search box) to raise it to 5,000.'
       );
     }
-    if (res.status === 404) {
-      throw new Error('Repository or branch not found (is it private or misspelled?).');
+    if (res.status === 401) throw new Error('That GitHub token was rejected — check it or remove it.');
+    if (res.status === 404 || res.status === 409) {
+      throw new Error(
+        token
+          ? 'Repository or branch not found (check the URL; for a private repo the token needs access to it).'
+          : "Repository or branch not found. If it's private, add a GitHub token that can read it."
+      );
     }
     throw new Error(`GitHub API error: ${res.status} ${res.statusText}`);
   }
