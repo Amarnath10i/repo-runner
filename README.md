@@ -51,6 +51,11 @@ that path contains spaces, in `%LOCALAPPDATA%\repo-runner\runtimes`; set
 ## Limits
 
 - No GPU. Desktop GUI programs (tkinter, pygame, Qt) need a real display.
+- In the browser sandbox, Next.js 15.5+ runs as Next.js 15.4 (newer versions don't
+  work in WebContainers yet) with webpack instead of Turbopack; Bun, Turborepo and
+  git-URL dependencies need the engine. The engine always uses the repo's own versions.
+- Apps that need a real database or third-party keys may show errors until those
+  are provided (Laravel demos fall back to SQLite automatically).
 - In the browser, Python packages must have Pyodide builds or pure-Python wheels
   (numpy, pandas, matplotlib, scikit-learn and most pure packages work; PyTorch doesn't).
 - On Windows with Smart App Control on, Windows may block programs the engine
