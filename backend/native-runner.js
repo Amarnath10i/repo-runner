@@ -625,6 +625,18 @@ async function installPython({ runtime, cwd, processEnv, onOutput }) {
   }[runtime.id];
   if (extra) await pip(extra);
 
+  // Hugging Face libraries need a tensor backend they don't depend on
+  // themselves ("name 'torch' is not defined"); add CPU PyTorch if none is there.
+  const code = collectSources(cwd, new Set(['.py'])).slice(0, 200).map((f) => readFileSafe(join(cwd, f)) || '').join('\n');
+  const manifest = [reqFile, 'pyproject.toml', 'setup.py'].filter(Boolean).map((f) => readFileSafe(join(cwd, f)) || '').join('\n');
+  const usesHF = /^\s*(?:import|from)\s+(transformers|diffusers|sentence_transformers|accelerate|peft)\b/m.test(code)
+    || /^\s*(transformers|diffusers|sentence-transformers|accelerate|peft)\b/im.test(manifest);
+  const hasBackend = existsSync(join(cwd, PY_SITE, 'torch')) || existsSync(join(cwd, PY_SITE, 'tensorflow')) || existsSync(join(cwd, PY_SITE, 'jax'));
+  if (usesHF && !hasBackend) {
+    onOutput('\n[install] Hugging Face libraries need PyTorch — installing it (CPU build)...\n');
+    await pip(['torch']);
+  }
+
   if (runtime.id === 'python-django') {
     const manage = runtime.manage || 'manage.py';
     onOutput('\n[setup] Applying Django migrations...\n');
@@ -1351,6 +1363,7 @@ function baseProcessEnv(envVars) {
     UV_TORCH_BACKEND: 'cpu',
     UV_HTTP_TIMEOUT: '600',
     HF_HUB_DISABLE_TELEMETRY: '1',
+    HF_HUB_DISABLE_SYMLINKS_WARNING: '1', // Windows without Developer Mode
     // T3-style env validation (@t3-oss/env) would refuse to start without every
     // secret; the demo should still come up and show its pages.
     SKIP_ENV_VALIDATION: '1',
@@ -1528,8 +1541,11 @@ export async function startNativeProcess({ sessionId, repoDir, runtime, envVars,
 
     // Compiled console programs and plain scripts rarely serve HTTP, so hand
     // over to the terminal quickly; the late-port watcher still catches servers.
+    // ML demo apps (Gradio/Streamlit/Jupyter) often download and load a model
+    // before they listen, so they get longer on the launch screen.
     const timeoutMs = ['cpp', 'java'].includes(runtime.id) ? 8000
       : runtime.id === 'python' ? 20000
+      : ['python-gradio', 'python-streamlit', 'python-notebook'].includes(runtime.id) ? 240000
       : runtime.id.startsWith('java') || runtime.id === 'dotnet' ? 180000
       : 90000;
     const readyPort = await waitForServer({ hostPort, observedPorts: observer.ports, timeoutMs, onOutput, exitInfo });

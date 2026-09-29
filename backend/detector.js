@@ -119,10 +119,10 @@ const RUNTIME_CONFIGS = [
     detect: (dir) => {
       if (readSpaceConfig(dir).sdk === 'streamlit') return true;
       const req = readFileSafe(join(dir, 'requirements.txt')) || readFileSafe(join(dir, 'pyproject.toml')) || '';
-      return req.toLowerCase().includes('streamlit');
+      return req.toLowerCase().includes('streamlit') || !!fileImporting(dir, 'streamlit');
     },
     getCommands: (dir) => {
-      const appFile = readSpaceConfig(dir).app_file || findPythonEntry(dir, ['app.py', 'streamlit_app.py', 'main.py', 'Home.py']);
+      const appFile = readSpaceConfig(dir).app_file || fileImporting(dir, 'streamlit') || findPythonEntry(dir, ['app.py', 'streamlit_app.py', 'main.py', 'Home.py']);
       return {
         install: 'pip install -r requirements.txt',
         start: `streamlit run ${appFile} --server.port=8501 --server.headless=true --server.address=0.0.0.0`,
@@ -139,11 +139,12 @@ const RUNTIME_CONFIGS = [
       if (readSpaceConfig(dir).sdk === 'gradio') return true;
       const req = readFileSafe(join(dir, 'requirements.txt'));
       if (req?.toLowerCase().includes('gradio')) return true;
+      if (fileImporting(dir, 'gradio')) return true;
       const pyproject = readFileSafe(join(dir, 'pyproject.toml'));
       return pyproject?.toLowerCase().includes('gradio') || false;
     },
     getCommands: (dir) => {
-      const appFile = readSpaceConfig(dir).app_file || findPythonEntry(dir, ['app.py', 'main.py', 'demo.py', 'run.py', 'gradio_app.py']);
+      const appFile = readSpaceConfig(dir).app_file || fileImporting(dir, 'gradio') || findPythonEntry(dir, ['app.py', 'main.py', 'demo.py', 'run.py', 'gradio_app.py']);
       return {
         install: 'pip install -r requirements.txt',
         start: `python ${appFile}`,
@@ -855,6 +856,40 @@ export function detectOrchestratedScript(repoDir) {
 }
 
 // --- Helpers ---
+
+/**
+ * The .py file (root first, then one folder down) that imports `mod` —
+ * finds Streamlit/Gradio apps that ship no requirements file. Prefers
+ * conventional entry names.
+ */
+function fileImporting(dir, mod) {
+  const re = new RegExp(`^\\s*(?:import|from)\\s+${mod}\\b`, 'm');
+  const candidates = [];
+  const scan = (rel) => {
+    let items;
+    try {
+      items = readdirSync(join(dir, rel), { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const it of items) {
+      const path = rel ? `${rel}/${it.name}` : it.name;
+      if (it.isFile() && it.name.endsWith('.py') && re.test(readFileSafe(join(dir, path)) || '')) candidates.push(path);
+    }
+    if (!rel) {
+      for (const it of items) {
+        if (it.isDirectory() && !SKIP_DIRS.has(it.name) && !it.name.startsWith('.')) scan(it.name);
+      }
+    }
+  };
+  scan('');
+  const preferred = /(^|\/)(app|main|streamlit_app|Home|demo|gradio_app)\.py$/;
+  return candidates.find((f) => !f.includes('/') && preferred.test(f))
+    || candidates.find((f) => !f.includes('/'))
+    || candidates.find((f) => preferred.test(f))
+    || candidates[0]
+    || null;
+}
 
 /**
  * Hugging Face Spaces declare how they run in README front matter:
