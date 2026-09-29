@@ -12,6 +12,7 @@
 // stripped, and WebSockets (HMR, Streamlit) are forwarded.
 
 import { createServer, get as httpGet } from 'http';
+import { connect } from 'net';
 import httpProxy from 'http-proxy';
 
 const proxy = httpProxy.createProxyServer({ changeOrigin: true, ws: true });
@@ -42,6 +43,36 @@ proxy.on('error', (err, req, res) => {
     res?.destroy?.(); // a WebSocket socket
   }
 });
+
+// ─── Where the app listens ───
+
+function canConnect(port, host) {
+  return new Promise((resolve) => {
+    const socket = connect({ port, host });
+    socket.setTimeout(800);
+    socket.once('connect', () => { socket.destroy(); resolve(true); });
+    socket.once('timeout', () => { socket.destroy(); resolve(false); });
+    socket.once('error', () => resolve(false));
+  });
+}
+
+const targetCache = new Map(); // port -> 'http://127.0.0.1:p' | 'http://[::1]:p'
+
+/**
+ * The app's origin. Dev servers that bind "localhost" listen only on IPv6
+ * (::1) on some systems (Node 17+ on Windows), others only on IPv4 — use
+ * whichever actually answers.
+ */
+async function originFor(port) {
+  const cached = targetCache.get(port);
+  if (cached) return cached;
+  const target = (await canConnect(port, '127.0.0.1')) || !(await canConnect(port, '::1'))
+    ? `http://127.0.0.1:${port}`
+    : `http://[::1]:${port}`;
+  targetCache.set(port, target);
+  setTimeout(() => targetCache.delete(port), 60_000).unref();
+  return target;
+}
 
 // ─── Landing page ───
 
@@ -93,7 +124,7 @@ function listen(server, port) {
 
 /** Open (or retarget) a session's proxy port. Returns the port. */
 export async function openPortProxy(sessionId, targetPort) {
-  const target = `http://127.0.0.1:${targetPort}`;
+  const target = await originFor(targetPort);
   const existing = portProxies.get(sessionId);
   if (existing) {
     existing.target = target;
@@ -153,14 +184,14 @@ function sessionFromReferer(req) {
  * the only running session's id, used when a request carries no hint.
  */
 export function createPathProxy({ targetFor, soleSession }) {
-  const forward = (req, res, id, prefix) => {
+  const forward = async (req, res, id, prefix) => {
     const port = targetFor(id);
     if (!port) {
       res.status(404).send('This preview has stopped. Run the repo again to get a new one.');
       return;
     }
     req.rrPrefix = prefix;
-    proxy.web(req, res, { target: `http://127.0.0.1:${port}` });
+    proxy.web(req, res, { target: await originFor(port) });
   };
 
   // /preview/<id>/... → the app, with the prefix stripped.
@@ -190,7 +221,7 @@ export function createPathProxy({ targetFor, soleSession }) {
   };
 
   // WebSocket upgrades for previews (HMR, Streamlit, Socket.IO).
-  const upgrade = (req, socket, head) => {
+  const upgrade = async (req, socket, head) => {
     const m = req.url.match(SESSION_IN_PATH);
     const id = m?.[1] || sessionFromReferer(req) || soleSession();
     const port = id && targetFor(id);
@@ -199,7 +230,7 @@ export function createPathProxy({ targetFor, soleSession }) {
       return;
     }
     if (m) req.url = m[2] || '/';
-    proxy.ws(req, socket, head, { target: `http://127.0.0.1:${port}` });
+    proxy.ws(req, socket, head, { target: await originFor(port) });
   };
 
   return { prefixed, fallback, upgrade };

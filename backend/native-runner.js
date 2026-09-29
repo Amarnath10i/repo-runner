@@ -588,8 +588,13 @@ async function installPython({ runtime, cwd, processEnv, onOutput }) {
     for (const p of pkgs) await pip([p]);
   };
 
-  const reqFile = findRequirementsFile(cwd);
+  let reqFile = findRequirementsFile(cwd);
   if (reqFile) {
+    const cpu = cpuRequirements(readFileSafe(join(cwd, reqFile)) || '', onOutput);
+    if (cpu !== null) {
+      writeFileSync(join(cwd, '.rr-requirements.txt'), cpu);
+      reqFile = '.rr-requirements.txt';
+    }
     if (!(await pip(['-r', reqFile]))) {
       // Old pins often have no wheels for current Python — retry unpinned.
       onOutput('\n[install] Pinned requirements failed — retrying with version pins relaxed...\n');
@@ -631,6 +636,37 @@ async function installPython({ runtime, cwd, processEnv, onOutput }) {
     }
   }
   return { python };
+}
+
+// GPU-only packages and their CPU counterparts ('' = drop: nothing to run on).
+const GPU_TO_CPU = {
+  'tensorflow-gpu': 'tensorflow', 'faiss-gpu': 'faiss-cpu', 'onnxruntime-gpu': 'onnxruntime',
+  'jax[cuda]': 'jax', 'cupy': '', 'bitsandbytes': '', 'flash-attn': '', 'flash_attn': '', 'xformers': '',
+  'deepspeed': '', 'triton': '', 'auto-gptq': '', 'vllm': '',
+};
+
+/**
+ * Make a requirements file installable on a CPU-only machine: CUDA wheel
+ * indexes and +cuXXX pins become CPU ones, GPU-only packages are swapped or
+ * dropped. Returns the rewritten text, or null when nothing needed changing.
+ */
+function cpuRequirements(text, onOutput) {
+  const dropped = [];
+  const out = text.split(/\r?\n/).map((line) => {
+    let l = line.replace(/(download\.pytorch\.org\/whl\/)(cu\d+|rocm[\d.]+)/g, '$1cpu');
+    l = l.replace(/^(\s*(torch|torchvision|torchaudio)\s*==\s*[\d.]+)\+(cu|rocm)[\w.]+/i, '$1');
+    const name = l.trim().split(/[<>=!~;\s]/)[0].toLowerCase();
+    if (/^nvidia-/.test(name)) { dropped.push(name); return `# ${line}  (GPU-only, skipped)`; }
+    if (name in GPU_TO_CPU) {
+      if (!GPU_TO_CPU[name]) { dropped.push(name); return `# ${line}  (GPU-only, skipped)`; }
+      return l.replace(new RegExp(`^\\s*${name.replace(/[[\]]/g, '\\$&')}`, 'i'), GPU_TO_CPU[name]);
+    }
+    return l;
+  });
+  const result = out.join('\n');
+  if (result === text) return null;
+  onOutput(`\n[install] No GPU here — using CPU builds${dropped.length ? ` and skipping GPU-only ${dropped.join(', ')}` : ''}.\n`);
+  return result;
 }
 
 /** Requirement lines reduced to bare package names (drops ==/>= pins). */
@@ -1310,6 +1346,14 @@ function baseProcessEnv(envVars) {
     PYTHONIOENCODING: 'utf-8',
     COREPACK_ENABLE_DOWNLOAD_PROMPT: '0',
     UV_LINK_MODE: 'copy', // uv's cache and the repos may sit on different drives
+    // ML projects: there's no GPU, so take CPU builds of PyTorch (uv picks the
+    // right index), and allow for multi-hundred-MB wheels on slow links.
+    UV_TORCH_BACKEND: 'cpu',
+    UV_HTTP_TIMEOUT: '600',
+    HF_HUB_DISABLE_TELEMETRY: '1',
+    // T3-style env validation (@t3-oss/env) would refuse to start without every
+    // secret; the demo should still come up and show its pages.
+    SKIP_ENV_VALIDATION: '1',
     ...(envVars || {}),
   };
 }

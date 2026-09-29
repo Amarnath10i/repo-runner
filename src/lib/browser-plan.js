@@ -36,6 +36,9 @@ export function readText(tree, path) {
 // Python packages that serve HTTP themselves — a browser tab can't open a
 // listening socket, so these need the backend.
 const PY_WEB_SERVERS = /^(gradio|flask|django|fastapi|uvicorn|aiohttp|tornado|bottle|sanic|dash|panel|quart|starlette|litestar|falcon|cherrypy|pyramid|web\.py|nicegui|reflex|chainlit|shiny)\b/im;
+// Deep-learning stacks have no WebAssembly builds for Pyodide.
+const PY_HEAVY_ML = /^(torch|tensorflow|tensorflow-cpu|keras|jax|transformers|diffusers|sentence-transformers|ultralytics|accelerate|onnxruntime|llama-cpp-python|vllm|langchain|llama-index|openai-whisper|spacy)\b/im;
+const PY_HEAVY_ML_IMPORT = /^\s*(?:import|from)\s+(torch|tensorflow|keras|jax|transformers|diffusers|sentence_transformers|ultralytics|whisper|langchain|llama_index|spacy)\b/m;
 // Desktop GUI toolkits have no window to draw into in a browser.
 const PY_DESKTOP_GUI = /^\s*(?:import|from)\s+(tkinter|pygame|PyQt[56]|PySide[26]|wx|kivy|customtkinter|turtle|pyautogui)\b/m;
 
@@ -63,6 +66,11 @@ export function planBrowserRun(tree, stack) {
     .join('\n');
 
   if (stack === 'python' || (stack === 'unknown' && files.some((f) => f.endsWith('.py') || f.endsWith('.ipynb')))) {
+    const rootCode = files.filter((f) => !f.includes('/') && f.endsWith('.py')).map((f) => readText(tree, f) || '').join('\n');
+    const heavy = (manifests.match(PY_HEAVY_ML) || rootCode.match(PY_HEAVY_ML_IMPORT))?.[1];
+    if (heavy) {
+      return { kind: null, reason: `This project uses ${heavy}, which can't run in a browser tab — it needs the runner engine (CPU builds are installed automatically).` };
+    }
     if (/\bstreamlit\b/.test(manifests) || files.some((f) => /(^|\/)streamlit_app\.py$/.test(f))) {
       const entry = pickPythonEntry(tree, files, ['streamlit_app.py', 'Home.py', 'app.py', 'main.py']);
       return { kind: 'stlite', label: 'Streamlit (in-browser)', entry, reason: 'Streamlit runs in your browser via stlite (Pyodide).' };
@@ -72,7 +80,6 @@ export function planBrowserRun(tree, stack) {
       return { kind: null, reason: `This is a ${server[0].trim()} web app — it needs to open a network port, which a browser tab can't do.` };
     }
     const entry = pickPythonEntry(tree, files, []);
-    const rootCode = files.filter((f) => !f.includes('/') && f.endsWith('.py')).map((f) => readText(tree, f) || '').join('\n');
     const gui = rootCode.match(PY_DESKTOP_GUI);
     if (gui) {
       return { kind: null, reason: `This program opens a desktop window (${gui[1]}), which can't be drawn inside a browser tab.` };

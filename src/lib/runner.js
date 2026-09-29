@@ -159,7 +159,7 @@ export async function runRepo({ tree, envVars, analysis, onOutput, onServerReady
 }
 
 // BROWSER=none: create-react-app & co. would otherwise try to open a tab.
-const SANDBOX_ENV = { BROWSER: 'none' };
+const SANDBOX_ENV = { BROWSER: 'none', SKIP_ENV_VALIDATION: '1' };
 
 /**
  * webpack 4-era tooling (react-scripts < 5, Vue CLI < 5, Next < 12, webpack

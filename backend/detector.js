@@ -117,16 +117,12 @@ const RUNTIME_CONFIGS = [
     icon: '🎈',
     color: '#ff4b4b',
     detect: (dir) => {
-      if (!existsSync(join(dir, 'requirements.txt'))) return false;
-      try {
-        const req = readFileSync(join(dir, 'requirements.txt'), 'utf8');
-        return req.toLowerCase().includes('streamlit');
-      } catch {
-        return false;
-      }
+      if (readSpaceConfig(dir).sdk === 'streamlit') return true;
+      const req = readFileSafe(join(dir, 'requirements.txt')) || readFileSafe(join(dir, 'pyproject.toml')) || '';
+      return req.toLowerCase().includes('streamlit');
     },
     getCommands: (dir) => {
-      const appFile = findPythonEntry(dir, ['app.py', 'streamlit_app.py', 'main.py']);
+      const appFile = readSpaceConfig(dir).app_file || findPythonEntry(dir, ['app.py', 'streamlit_app.py', 'main.py', 'Home.py']);
       return {
         install: 'pip install -r requirements.txt',
         start: `streamlit run ${appFile} --server.port=8501 --server.headless=true --server.address=0.0.0.0`,
@@ -140,13 +136,14 @@ const RUNTIME_CONFIGS = [
     icon: '🤗',
     color: '#ff7c00',
     detect: (dir) => {
+      if (readSpaceConfig(dir).sdk === 'gradio') return true;
       const req = readFileSafe(join(dir, 'requirements.txt'));
       if (req?.toLowerCase().includes('gradio')) return true;
       const pyproject = readFileSafe(join(dir, 'pyproject.toml'));
       return pyproject?.toLowerCase().includes('gradio') || false;
     },
     getCommands: (dir) => {
-      const appFile = findPythonEntry(dir, ['app.py', 'main.py', 'demo.py', 'run.py', 'gradio_app.py']);
+      const appFile = readSpaceConfig(dir).app_file || findPythonEntry(dir, ['app.py', 'main.py', 'demo.py', 'run.py', 'gradio_app.py']);
       return {
         install: 'pip install -r requirements.txt',
         start: `python ${appFile}`,
@@ -858,6 +855,21 @@ export function detectOrchestratedScript(repoDir) {
 }
 
 // --- Helpers ---
+
+/**
+ * Hugging Face Spaces declare how they run in README front matter:
+ *   ---
+ *   sdk: gradio
+ *   app_file: app.py
+ *   ---
+ * (Spaces preinstall the SDK, so it's often missing from requirements.txt.)
+ */
+function readSpaceConfig(dir) {
+  const readme = readFileSafe(join(dir, 'README.md')) || '';
+  const front = readme.match(/^---\r?\n([\s\S]*?)\r?\n---/)?.[1] || '';
+  const get = (key) => front.match(new RegExp(`^${key}:\\s*["']?([^"'\\r\\n#]+)`, 'm'))?.[1]?.trim();
+  return { sdk: get('sdk'), app_file: get('app_file') };
+}
 
 /** npm / pnpm / yarn / bun, from the lockfile or package.json "packageManager". */
 function detectNodeManager(dir, pkg) {
