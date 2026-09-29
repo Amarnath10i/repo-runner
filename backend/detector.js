@@ -46,11 +46,7 @@ const RUNTIME_CONFIGS = [
     getCommands: (dir) => {
       const pkg = readJsonSafe(join(dir, 'package.json'));
       const scripts = pkg?.scripts ?? {};
-      const manager = existsSync(join(dir, 'pnpm-lock.yaml'))
-        ? 'pnpm'
-        : existsSync(join(dir, 'yarn.lock'))
-          ? 'yarn'
-          : 'npm';
+      const manager = detectNodeManager(dir, pkg);
 
       const startScript = scripts.dev
         ? 'dev'
@@ -74,12 +70,37 @@ const RUNTIME_CONFIGS = [
           : `${manager} start`;
       } else {
         const entry = findNodeEntry(dir, pkg);
-        start = entry ? `node ${entry}` : `${manager} start`;
+        if (!entry) start = `${manager} start`;
+        else if (manager === 'bun') start = `bun ${entry}`;
+        else if (/\.[cm]?ts$/.test(entry)) start = `npx --yes tsx ${entry}`;
+        else start = `node ${entry}`;
       }
 
       return {
         install: `${manager} install`,
         start,
+        manager,
+        dockerfile: null,
+      };
+    },
+  },
+  {
+    id: 'deno',
+    label: 'Deno',
+    icon: '🦕',
+    color: '#70ffaf',
+    detect: (dir) =>
+      !existsSync(join(dir, 'package.json')) &&
+      ['deno.json', 'deno.jsonc'].some((f) => existsSync(join(dir, f))),
+    getCommands: (dir) => {
+      const cfgFile = ['deno.json', 'deno.jsonc'].find((f) => existsSync(join(dir, f)));
+      const cfg = readJsoncSafe(join(dir, cfgFile)) || {};
+      const task = ['dev', 'start', 'serve'].find((t) => cfg.tasks?.[t]);
+      const entry = ['main.ts', 'server.ts', 'mod.ts', 'index.ts', 'app.ts', 'main.js', 'src/main.ts']
+        .find((f) => existsSync(join(dir, f))) || 'main.ts';
+      return {
+        install: null,
+        start: task ? `deno task ${task}` : `deno run -A ${entry}`,
         dockerfile: null,
       };
     },
@@ -155,11 +176,12 @@ const RUNTIME_CONFIGS = [
       return req?.toLowerCase().includes('fastapi') || false;
     },
     getCommands: (dir) => {
-      const appFile = findPythonEntry(dir, ['main.py', 'app.py', 'server.py']);
-      const moduleName = appFile.replace('.py', '').replace('/', '.');
+      const appFile = findFastApiApp(dir) || findPythonEntry(dir, ['main.py', 'app.py', 'server.py']);
+      const moduleName = appFile.replace(/\.py$/, '').replace(/\//g, '.');
+      const appVar = readFileSafe(join(dir, appFile))?.match(/^(\w+)\s*=\s*FastAPI\(/m)?.[1] || 'app';
       return {
         install: 'pip install -r requirements.txt uvicorn',
-        start: `uvicorn ${moduleName}:app --host 0.0.0.0 --port 8000 --reload`,
+        start: `uvicorn ${moduleName}:${appVar} --host 0.0.0.0 --port 8000 --reload`,
         dockerfile: null,
       };
     },
@@ -173,9 +195,29 @@ const RUNTIME_CONFIGS = [
       const req = readFileSafe(join(dir, 'requirements.txt'));
       return req?.toLowerCase().includes('django') || existsSync(join(dir, 'manage.py'));
     },
+    getCommands: (dir) => {
+      const manage = existsSync(join(dir, 'manage.py')) ? 'manage.py' : findFileRecursive(dir, 'manage.py') || 'manage.py';
+      return {
+        install: 'pip install -r requirements.txt',
+        start: `python ${manage} runserver 0.0.0.0:8000`,
+        manage,
+        dockerfile: null,
+      };
+    },
+  },
+  {
+    // Notebook-only repos (common for ML/data work): serve them in JupyterLab.
+    // Only chosen when there's no conventional script entry point to run.
+    id: 'python-notebook',
+    label: 'Jupyter Notebooks',
+    icon: '📓',
+    color: '#f37626',
+    detect: (dir) =>
+      findFileRecursive(dir, '.ipynb', true) !== null &&
+      !['app.py', 'main.py', 'run.py', 'server.py', 'manage.py'].some((f) => existsSync(join(dir, f))),
     getCommands: () => ({
-      install: 'pip install -r requirements.txt',
-      start: 'python manage.py runserver 0.0.0.0:8000',
+      install: 'pip install jupyterlab',
+      start: 'jupyter lab',
       dockerfile: null,
     }),
   },
@@ -239,14 +281,24 @@ const RUNTIME_CONFIGS = [
     label: 'Ruby',
     icon: '💎',
     color: '#cc342d',
-    detect: (dir) => existsSync(join(dir, 'Gemfile')),
+    detect: (dir) => {
+      if (existsSync(join(dir, 'Gemfile'))) return true;
+      try {
+        return readdirSync(dir).some((f) => f.endsWith('.rb'));
+      } catch {
+        return false;
+      }
+    },
     getCommands: (dir) => {
       const isRails = existsSync(join(dir, 'config', 'routes.rb'));
-      return {
-        install: 'bundle install',
-        start: isRails ? 'rails server -b 0.0.0.0 -p 3000' : 'ruby app.rb',
-        dockerfile: null,
-      };
+      const hasRackup = existsSync(join(dir, 'config.ru'));
+      const entry = ['app.rb', 'main.rb', 'server.rb', 'application.rb']
+        .find((f) => existsSync(join(dir, f))) || findFileRecursive(dir, '.rb', true) || 'app.rb';
+      let start;
+      if (isRails) start = 'bundle exec rails server -b 0.0.0.0 -p 3000';
+      else if (hasRackup) start = 'bundle exec rackup -o 0.0.0.0 -p 9292';
+      else start = `bundle exec ruby ${entry}`;
+      return { install: 'bundle install', start, rails: isRails, rackup: hasRackup, entry, dockerfile: null };
     },
   },
   {
@@ -254,15 +306,21 @@ const RUNTIME_CONFIGS = [
     label: 'PHP',
     icon: '🐘',
     color: '#777bb4',
-    detect: (dir) => existsSync(join(dir, 'composer.json')) || existsSync(join(dir, 'index.php')),
+    detect: (dir) =>
+      existsSync(join(dir, 'composer.json')) ||
+      ['.', ...PHP_DOCROOTS].some((d) => existsSync(join(dir, d, 'index.php'))),
     getCommands: (dir) => {
       const hasComposer = existsSync(join(dir, 'composer.json'));
       const hasArtisan = existsSync(join(dir, 'artisan'));
+      // Frameworks (Laravel, Symfony, Slim) serve from public/ or web/.
+      const docroot = PHP_DOCROOTS.find((d) => existsSync(join(dir, d, 'index.php'))) || '.';
       return {
         install: hasComposer ? 'composer install' : null,
         start: hasArtisan
           ? 'php artisan serve --host=0.0.0.0 --port=8000'
-          : 'php -S 0.0.0.0:8000',
+          : `php -S 0.0.0.0:8000 -t ${docroot}`,
+        artisan: hasArtisan,
+        docroot,
         dockerfile: null,
       };
     },
@@ -273,11 +331,16 @@ const RUNTIME_CONFIGS = [
     icon: '☕',
     color: '#f89820',
     detect: (dir) => existsSync(join(dir, 'pom.xml')),
-    getCommands: () => ({
-      install: 'mvn clean package -DskipTests',
-      start: 'mvn spring-boot:run',
-      dockerfile: null,
-    }),
+    getCommands: (dir) => {
+      const pom = readFileSafe(join(dir, 'pom.xml')) || '';
+      const framework = javaFramework(pom);
+      return {
+        install: 'mvn -DskipTests package',
+        start: framework === 'spring' ? 'mvn spring-boot:run' : framework === 'quarkus' ? 'mvn quarkus:dev' : 'java <main class>',
+        framework,
+        dockerfile: null,
+      };
+    },
   },
   {
     id: 'java-gradle',
@@ -285,30 +348,44 @@ const RUNTIME_CONFIGS = [
     icon: '☕',
     color: '#f89820',
     detect: (dir) => existsSync(join(dir, 'build.gradle')) || existsSync(join(dir, 'build.gradle.kts')),
-    getCommands: () => ({
-      install: './gradlew build -x test',
-      start: './gradlew bootRun',
-      dockerfile: null,
-    }),
+    getCommands: (dir) => {
+      const build = readFileSafe(join(dir, 'build.gradle')) || readFileSafe(join(dir, 'build.gradle.kts')) || '';
+      const framework = /com\.android\./.test(build) ? 'android' : javaFramework(build);
+      const task = framework === 'spring' ? 'bootRun' : framework === 'quarkus' ? 'quarkusDev' : /\bapplication\b/.test(build) ? 'run' : null;
+      return {
+        install: task ? null : 'gradle build -x test',
+        start: task ? `gradle ${task}` : 'java <main class>',
+        framework,
+        task,
+        dockerfile: null,
+      };
+    },
   },
   {
     id: 'dotnet',
     label: '.NET / C#',
     icon: '🟣',
     color: '#512bd4',
-    detect: (dir) => {
-      try {
-        const files = readdirSync(dir);
-        return files.some((f) => f.endsWith('.csproj') || f.endsWith('.sln'));
-      } catch {
-        return false;
-      }
+    detect: (dir) => findDotnetProject(dir) !== null,
+    getCommands: (dir) => {
+      const project = findDotnetProject(dir);
+      return {
+        install: `dotnet restore "${project}"`,
+        start: `dotnet run --project "${project}" --urls http://0.0.0.0:5000`,
+        project,
+        dockerfile: null,
+      };
     },
-    getCommands: () => ({
-      install: 'dotnet restore',
-      start: 'dotnet run --urls http://0.0.0.0:5000',
-      dockerfile: null,
-    }),
+  },
+  {
+    // Plain Java sources with no build tool (typical for coursework): compiled
+    // with javac and the class with a main() method is run.
+    id: 'java',
+    label: 'Java',
+    icon: '☕',
+    color: '#f89820',
+    detect: (dir) => findFileRecursive(dir, '.java', true) !== null,
+    getCommands: () => ({ install: 'javac', start: 'java <main class>', dockerfile: null }),
   },
   {
     id: 'cpp',
@@ -322,16 +399,15 @@ const RUNTIME_CONFIGS = [
       findFileRecursive(dir, '.cxx', true) !== null ||
       findFileRecursive(dir, '.c', true) !== null,
     getCommands: (dir) => {
-      // `console: true` marks a program with no web server / preview — its
-      // output is streamed to the terminal instead. Compilation is handled by
-      // the native runner (it enumerates the source files).
+      // The native runner builds (CMake → Makefile → direct compile) and runs
+      // the resulting program; console programs just stream to the terminal.
       if (existsSync(join(dir, 'CMakeLists.txt'))) {
-        return { install: 'cmake -B build && cmake --build build', start: null, dockerfile: null, console: true };
+        return { install: 'cmake --build', start: '<built program>', dockerfile: null };
       }
       if (existsSync(join(dir, 'Makefile')) || existsSync(join(dir, 'makefile'))) {
-        return { install: 'make', start: null, dockerfile: null, console: true };
+        return { install: 'make', start: '<built program>', dockerfile: null };
       }
-      return { install: null, start: null, dockerfile: null, console: true };
+      return { install: 'g++ / gcc', start: '<compiled program>', dockerfile: null };
     },
   },
   {
@@ -364,6 +440,8 @@ const RUNTIME_CONFIGS = [
     },
   },
 ];
+
+const PHP_DOCROOTS = ['public', 'web', 'public_html', 'www'];
 
 // Docker-based runtimes need a Docker daemon; everything else can run natively.
 const DOCKER_RUNTIME_IDS = new Set(['docker-compose', 'dockerfile']);
@@ -463,15 +541,20 @@ export function detectRuntime(repoDir) {
   const nested = findNativeRuntime(repoDir);
   if (nested) return nested;
 
+  // No runnable app (docs, dotfiles, a language we can't run): serve the
+  // repository as a browsable file listing rather than failing outright.
   return {
-    id: 'unknown',
-    label: 'Unknown',
-    icon: '❓',
-    color: '#888',
+    id: 'static',
+    label: 'Repository Files',
+    icon: '📁',
+    color: '#8b949e',
     workdir: '',
     install: null,
     start: null,
     dockerfile: null,
+    static: true,
+    browse: true,
+    entry: 'index.html',
   };
 }
 
@@ -483,8 +566,14 @@ const FRONTEND_DEP_MARKERS = [
   'svelte', '@sveltejs/kit', 'gatsby', 'react-dom',
 ];
 
+const SERVICE_MANIFESTS = [
+  'package.json', 'requirements.txt', 'pyproject.toml', 'Pipfile', 'manage.py', 'go.mod', 'Cargo.toml',
+  'composer.json', 'Gemfile', 'pom.xml', 'build.gradle', 'build.gradle.kts', 'deno.json', 'deno.jsonc',
+];
+
 function classifyRole(dirName, runtime, absDir) {
   const lower = (dirName || '').toLowerCase();
+  if (runtime.static) return 'frontend';
   if (FRONTEND_HINT_DIRS.has(lower)) return 'frontend';
   if (BACKEND_HINT_DIRS.has(lower)) return 'backend';
   if (runtime.id === 'node') {
@@ -520,7 +609,21 @@ export function detectServices(repoDir) {
     return { role: classifyRole(d, runtime, absDir), runtime, workdir: d };
   };
 
-  const subServices = subdirs.map(asService).filter(Boolean);
+  // A subfolder is its own service only if it's a project in its own right
+  // (has a manifest) or a plain-HTML frontend folder. Otherwise it's part of
+  // the root app — a PHP docroot like web/, a templates/ or views/ folder.
+  const isStandalone = (d) => {
+    const absDir = join(repoDir, d);
+    if (SERVICE_MANIFESTS.some((f) => existsSync(join(absDir, f)))) return true;
+    try {
+      if (readdirSync(absDir).some((f) => /\.(cs|fs)proj$/.test(f))) return true;
+    } catch {
+      return false;
+    }
+    return FRONTEND_HINT_DIRS.has(d.toLowerCase()) && existsSync(join(absDir, 'index.html'));
+  };
+
+  const subServices = subdirs.filter(isStandalone).map(asService).filter(Boolean);
 
   // In a monorepo where subfolders already provide both a frontend and a
   // backend, trust them and ignore loose root-level files (e.g. a leftover
@@ -676,6 +779,9 @@ export function getDockerImage(runtimeId) {
     'python-django': 'python:3.11-slim',
     'python-streamlit': 'python:3.11-slim',
     'python-gradio': 'python:3.11-slim',
+    'python-notebook': 'python:3.11-slim',
+    'deno': 'denoland/deno:latest',
+    'java': 'eclipse-temurin:21-jdk',
     'go': 'golang:1.22-alpine',
     'rust': 'rust:1-slim',
     'ruby': 'ruby:3.3-slim',
@@ -691,6 +797,71 @@ export function getDockerImage(runtimeId) {
 
 // --- Helpers ---
 
+/** npm / pnpm / yarn / bun, from the lockfile or package.json "packageManager". */
+function detectNodeManager(dir, pkg) {
+  if (existsSync(join(dir, 'bun.lockb')) || existsSync(join(dir, 'bun.lock'))) return 'bun';
+  if (existsSync(join(dir, 'pnpm-lock.yaml'))) return 'pnpm';
+  if (existsSync(join(dir, 'yarn.lock'))) return 'yarn';
+  const declared = pkg?.packageManager?.split('@')[0];
+  return ['pnpm', 'yarn', 'bun'].includes(declared) ? declared : 'npm';
+}
+
+/** Which JVM web framework (if any) a build file pulls in. */
+function javaFramework(buildFile) {
+  if (/spring-boot|org\.springframework\.boot/.test(buildFile)) return 'spring';
+  if (/io\.quarkus/.test(buildFile)) return 'quarkus';
+  return null;
+}
+
+/**
+ * Find the .NET project to run: prefer a web project, skip test projects.
+ * Searches the root and two levels down (solutions usually nest projects).
+ */
+function findDotnetProject(dir) {
+  const projects = [];
+  const walk = (d, rel, depth) => {
+    let items;
+    try {
+      items = readdirSync(d, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const it of items) {
+      const r = rel ? `${rel}/${it.name}` : it.name;
+      if (it.isDirectory()) {
+        if (depth < 2 && !SKIP_DIRS.has(it.name) && !it.name.startsWith('.')) walk(join(d, it.name), r, depth + 1);
+      } else if (/\.(cs|fs|vb)proj$/.test(it.name)) {
+        projects.push(r);
+      }
+    }
+  };
+  walk(dir, '', 0);
+  const runnable = projects.filter((p) => !/test/i.test(p));
+  if (!runnable.length) return null;
+  const isWeb = (p) => /Sdk="Microsoft\.NET\.Sdk\.(Web|BlazorWebAssembly|Razor)"/.test(readFileSafe(join(dir, p)) || '');
+  const isExe = (p) => /<OutputType>\s*(Win)?Exe\s*<\/OutputType>/i.test(readFileSafe(join(dir, p)) || '');
+  return runnable.find(isWeb) || runnable.find(isExe) || runnable[0];
+}
+
+/** The .py file that creates the FastAPI app, if any. */
+function findFastApiApp(dir) {
+  for (const f of ['main.py', 'app.py', 'server.py', 'app/main.py', 'src/main.py', 'api/main.py', 'backend/main.py']) {
+    if (/=\s*FastAPI\(/.test(readFileSafe(join(dir, f)) || '')) return f;
+  }
+  return null;
+}
+
+/** JSON with comments (deno.jsonc, tsconfig-style). */
+function readJsoncSafe(filePath) {
+  const text = readFileSafe(filePath);
+  if (!text) return null;
+  try {
+    return JSON.parse(text.replace(/^\s*\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, ''));
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Find a Node app's real entry file when package.json has no start script.
  * Prefers package.json "main", then common server/entry filenames — so we
@@ -703,6 +874,8 @@ function findNodeEntry(dir, pkg) {
     'index.js', 'server.js', 'app.js', 'main.js', 'index.mjs', 'index.cjs',
     'src/index.js', 'src/server.js', 'src/app.js', 'src/main.js',
     'app/index.js', 'server/index.js', 'bin/www', 'dist/index.js',
+    'index.ts', 'server.ts', 'app.ts', 'main.ts',
+    'src/index.ts', 'src/server.ts', 'src/app.ts', 'src/main.ts',
   );
   for (const c of candidates) {
     if (c && existsSync(join(dir, c))) return c;
@@ -769,10 +942,14 @@ function findPythonEntry(dir, candidates) {
   for (const name of candidates) {
     if (existsSync(join(dir, name))) return name;
   }
-  // If none found, look for any .py file in the root
+  // If none found, pick a root .py file — preferring one with a __main__ guard,
+  // and never packaging/test helpers like setup.py or conftest.py.
   try {
-    const files = readdirSync(dir).filter((f) => f.endsWith('.py'));
-    if (files.length > 0) return files[0];
+    const files = readdirSync(dir).filter(
+      (f) => f.endsWith('.py') && !/^(setup|conftest|__init__)\.py$|^test_/.test(f)
+    );
+    const withMain = files.find((f) => /__name__\s*==\s*['"]__main__['"]/.test(readFileSafe(join(dir, f)) || ''));
+    if (withMain || files.length > 0) return withMain || files[0];
   } catch {
     // ignore
   }

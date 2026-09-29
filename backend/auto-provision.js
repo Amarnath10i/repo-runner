@@ -1,267 +1,461 @@
 // Auto-provision runtimes that aren't installed on the host machine.
-// Downloads portable/standalone builds so projects "just work" without
-// requiring the user to install Python, Go, etc. manually.
+// Downloads portable/standalone builds into backend/.runtimes so projects
+// "just work" without the user installing Python, Java, PHP, etc. manually.
+//
+// Each tool is described once in TOOLS (download URL per platform + the binary
+// to look for). ensureTool() downloads and extracts it on first use and returns
+// the bin directory (to prepend to PATH) plus any env vars the tool needs.
 
-import { execSync, spawn as nodeSpawn } from 'child_process';
-import { join, resolve } from 'path';
-import { existsSync, mkdirSync, createWriteStream, unlinkSync, readFileSync, writeFileSync } from 'fs';
-import { createInterface } from 'readline';
+import { execSync, spawn } from 'child_process';
+import { join, dirname, relative, resolve } from 'path';
+import {
+  existsSync, mkdirSync, createWriteStream, unlinkSync, readFileSync, writeFileSync,
+  readdirSync, chmodSync,
+} from 'fs';
 import https from 'https';
 import http from 'http';
 
-const PROVISION_DIR = join(process.cwd(), '.runtimes');
+const IS_WIN = process.platform === 'win32';
+const PROVISION_DIR = defaultProvisionDir();
 
-// ─── Python Provisioning ───
+/**
+ * Where runtimes live. Normally backend/.runtimes, but MinGW (used for C/C++
+ * and Rust on Windows) can't link from a path containing spaces, so on
+ * Windows fall back to a space-free folder. REPO_RUNNER_RUNTIMES overrides.
+ */
+function defaultProvisionDir() {
+  if (process.env.REPO_RUNNER_RUNTIMES) return process.env.REPO_RUNNER_RUNTIMES;
+  const local = join(process.cwd(), '.runtimes');
+  if (!IS_WIN || !/\s/.test(local)) return local;
+  const appData = process.env.LOCALAPPDATA;
+  if (appData && !/\s/.test(appData)) return join(appData, 'repo-runner', 'runtimes');
+  return join(process.env.SystemDrive || 'C:', 'repo-runner-runtimes');
+}
+const PLATFORM = `${process.platform}-${process.arch}`;
+const exe = (name) => (IS_WIN ? `${name}.exe` : name);
 
-const PYTHON_VERSION = '3.12.4';
-const PYTHON_DIR = join(PROVISION_DIR, 'python');
-const PYTHON_MARKER = join(PYTHON_DIR, '.provisioned');
+// Versions are pinned where the download URL needs one, so a runner that
+// worked yesterday downloads the same thing today.
+const GO_VERSION = '1.23.4';
+const MAVEN_VERSION = '3.9.9';
+const GRADLE_VERSION = '8.10.2';
+const PHP_BRANCH = '8.3';
+const RUBY_RELEASE = '3.3.12-1';
+const WINLIBS_RELEASE = '16.2.0posix-14.0.0-ucrt-r1';
+const WINLIBS_ZIP = 'winlibs-x86_64-posix-seh-gcc-16.2.0-mingw-w64ucrt-14.0.0-r1.zip';
 
-// Python embeddable package URLs
-const PYTHON_URLS = {
-  'win32-x64': `https://www.python.org/ftp/python/${PYTHON_VERSION}/python-${PYTHON_VERSION}-embed-amd64.zip`,
-  'win32-ia32': `https://www.python.org/ftp/python/${PYTHON_VERSION}/python-${PYTHON_VERSION}-embed-win32.zip`,
-  'linux-x64': `https://www.python.org/ftp/python/${PYTHON_VERSION}/Python-${PYTHON_VERSION}.tgz`,
-  'darwin-x64': `https://www.python.org/ftp/python/${PYTHON_VERSION}/Python-${PYTHON_VERSION}.tgz`,
+const adoptium = (version, os, arch) =>
+  `https://api.adoptium.net/v3/binary/latest/${version}/ga/${os}/${arch}/jdk/hotspot/normal/eclipse`;
+
+/** A Temurin JDK tool definition. Old Gradle wrappers need an older JDK. */
+function jdk(version) {
+  return {
+    label: `Java ${version} (Temurin JDK)`,
+    icon: '☕',
+    urls: {
+      'win32-x64': adoptium(version, 'windows', 'x64'),
+      'linux-x64': adoptium(version, 'linux', 'x64'),
+      'linux-arm64': adoptium(version, 'linux', 'aarch64'),
+      'darwin-x64': adoptium(version, 'mac', 'x64'),
+      'darwin-arm64': adoptium(version, 'mac', 'aarch64'),
+    },
+    archive: IS_WIN ? '.zip' : '.tar.gz',
+    bin: exe('javac'),
+    // JAVA_HOME is the folder above bin/ (on macOS that's Contents/Home).
+    env: (binDir) => ({ JAVA_HOME: dirname(binDir) }),
+  };
+}
+
+const TOOLS = {
+  // uv manages Python itself: it downloads a standalone CPython per project
+  // (defaulting to a version with broad wheel support) and creates the venv.
+  uv: {
+    label: 'uv (Python manager)',
+    icon: '🐍',
+    urls: {
+      'win32-x64': 'https://github.com/astral-sh/uv/releases/latest/download/uv-x86_64-pc-windows-msvc.zip',
+      'linux-x64': 'https://github.com/astral-sh/uv/releases/latest/download/uv-x86_64-unknown-linux-gnu.tar.gz',
+      'linux-arm64': 'https://github.com/astral-sh/uv/releases/latest/download/uv-aarch64-unknown-linux-gnu.tar.gz',
+      'darwin-x64': 'https://github.com/astral-sh/uv/releases/latest/download/uv-x86_64-apple-darwin.tar.gz',
+      'darwin-arm64': 'https://github.com/astral-sh/uv/releases/latest/download/uv-aarch64-apple-darwin.tar.gz',
+    },
+    bin: exe('uv'),
+    env: () => ({ UV_PYTHON_INSTALL_DIR: join(PROVISION_DIR, 'uv-python') }),
+  },
+  go: {
+    label: `Go ${GO_VERSION}`,
+    icon: '🔵',
+    urls: {
+      'win32-x64': `https://go.dev/dl/go${GO_VERSION}.windows-amd64.zip`,
+      'linux-x64': `https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz`,
+      'linux-arm64': `https://go.dev/dl/go${GO_VERSION}.linux-arm64.tar.gz`,
+      'darwin-x64': `https://go.dev/dl/go${GO_VERSION}.darwin-amd64.tar.gz`,
+      'darwin-arm64': `https://go.dev/dl/go${GO_VERSION}.darwin-arm64.tar.gz`,
+    },
+    bin: exe('go'),
+  },
+  java: jdk(21),
+  java17: jdk(17),
+  java11: jdk(11),
+  maven: {
+    label: `Maven ${MAVEN_VERSION}`,
+    icon: '☕',
+    urls: anyPlatform(`https://archive.apache.org/dist/maven/maven-3/${MAVEN_VERSION}/binaries/apache-maven-${MAVEN_VERSION}-bin.zip`),
+    bin: IS_WIN ? 'mvn.cmd' : 'mvn',
+    requires: ['java'],
+  },
+  gradle: {
+    label: `Gradle ${GRADLE_VERSION}`,
+    icon: '🐘',
+    urls: anyPlatform(`https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip`),
+    bin: IS_WIN ? 'gradle.bat' : 'gradle',
+    requires: ['java'],
+  },
+  php: {
+    label: `PHP ${PHP_BRANCH}`,
+    icon: '🐘',
+    // Windows builds move to /archives once superseded, so resolve the
+    // current patch release from the official index at download time.
+    urls: { 'win32-x64': resolvePhpUrl },
+    archive: '.zip',
+    bin: 'php.exe',
+    setup: setupPhp,
+  },
+  ruby: {
+    label: `Ruby ${RUBY_RELEASE.split('-')[0]}`,
+    icon: '💎',
+    urls: {
+      'win32-x64': `https://github.com/oneclick/rubyinstaller2/releases/download/RubyInstaller-${RUBY_RELEASE}/rubyinstaller-${RUBY_RELEASE}-x64.7z`,
+    },
+    bin: 'ruby.exe',
+  },
+  cpp: {
+    label: 'GCC / MinGW-w64 (C/C++ toolchain)',
+    icon: '🔧',
+    urls: {
+      'win32-x64': `https://github.com/brechtsanders/winlibs_mingw/releases/download/${WINLIBS_RELEASE}/${WINLIBS_ZIP}`,
+    },
+    bin: 'g++.exe',
+  },
+  bun: {
+    label: 'Bun',
+    icon: '🥟',
+    urls: {
+      'win32-x64': 'https://github.com/oven-sh/bun/releases/latest/download/bun-windows-x64.zip',
+      'linux-x64': 'https://github.com/oven-sh/bun/releases/latest/download/bun-linux-x64.zip',
+      'linux-arm64': 'https://github.com/oven-sh/bun/releases/latest/download/bun-linux-aarch64.zip',
+      'darwin-x64': 'https://github.com/oven-sh/bun/releases/latest/download/bun-darwin-x64.zip',
+      'darwin-arm64': 'https://github.com/oven-sh/bun/releases/latest/download/bun-darwin-aarch64.zip',
+    },
+    bin: exe('bun'),
+  },
+  deno: {
+    label: 'Deno',
+    icon: '🦕',
+    urls: {
+      'win32-x64': 'https://github.com/denoland/deno/releases/latest/download/deno-x86_64-pc-windows-msvc.zip',
+      'linux-x64': 'https://github.com/denoland/deno/releases/latest/download/deno-x86_64-unknown-linux-gnu.zip',
+      'linux-arm64': 'https://github.com/denoland/deno/releases/latest/download/deno-aarch64-unknown-linux-gnu.zip',
+      'darwin-x64': 'https://github.com/denoland/deno/releases/latest/download/deno-x86_64-apple-darwin.zip',
+      'darwin-arm64': 'https://github.com/denoland/deno/releases/latest/download/deno-aarch64-apple-darwin.zip',
+    },
+    bin: exe('deno'),
+  },
+  // Rust is installed through rustup-init rather than an archive.
+  rust: {
+    label: 'Rust (stable)',
+    icon: '🦀',
+    urls: {
+      'win32-x64': 'https://static.rust-lang.org/rustup/dist/x86_64-pc-windows-msvc/rustup-init.exe',
+      'linux-x64': 'https://static.rust-lang.org/rustup/dist/x86_64-unknown-linux-gnu/rustup-init',
+      'linux-arm64': 'https://static.rust-lang.org/rustup/dist/aarch64-unknown-linux-gnu/rustup-init',
+      'darwin-x64': 'https://static.rust-lang.org/rustup/dist/x86_64-apple-darwin/rustup-init',
+      'darwin-arm64': 'https://static.rust-lang.org/rustup/dist/aarch64-apple-darwin/rustup-init',
+    },
+    bin: exe('cargo'),
+    install: installRust,
+    env: () => ({
+      RUSTUP_HOME: join(PROVISION_DIR, 'rust', 'rustup'),
+      CARGO_HOME: join(PROVISION_DIR, 'rust', 'cargo'),
+    }),
+  },
 };
 
-const GET_PIP_URL = 'https://bootstrap.pypa.io/get-pip.py';
+function anyPlatform(url) {
+  return Object.fromEntries(
+    ['win32-x64', 'linux-x64', 'linux-arm64', 'darwin-x64', 'darwin-arm64'].map((k) => [k, url])
+  );
+}
 
-/**
- * Check if Python has been provisioned already.
- */
-export function isPythonProvisioned() {
-  return existsSync(PYTHON_MARKER);
+/** Can this tool be auto-provisioned on this machine? */
+export function canProvision(name) {
+  const tool = TOOLS[name];
+  if (!tool?.urls[PLATFORM]) return false;
+  return (tool.requires || []).every(canProvision);
+}
+
+function markerPath(name) {
+  return join(PROVISION_DIR, name, '.provisioned');
+}
+
+function readMarker(name) {
+  try {
+    const marker = JSON.parse(readFileSync(markerPath(name), 'utf8'));
+    // binDir is stored relative to PROVISION_DIR so the folder can be moved.
+    return { ...marker, binDir: resolve(PROVISION_DIR, marker.binDir) };
+  } catch {
+    return null;
+  }
+}
+
+export function isProvisioned(name) {
+  const marker = readMarker(name);
+  return !!marker && existsSync(join(marker.binDir, TOOLS[name].bin));
 }
 
 /**
- * Get the path to the provisioned Python executable.
+ * Env additions for an already-provisioned tool (and the tools it requires):
+ * { pathDirs: [...], vars: {...} }, or null when it isn't provisioned.
  */
-export function getProvisionedPythonPath() {
-  if (!isPythonProvisioned()) return null;
-  const isWin = process.platform === 'win32';
-  return isWin ? join(PYTHON_DIR, 'python.exe') : join(PYTHON_DIR, 'bin', 'python3');
+export function getProvisionedEnv(name) {
+  if (!isProvisioned(name)) return null;
+  const tool = TOOLS[name];
+  const { binDir } = readMarker(name);
+  const pathDirs = [binDir];
+  let vars = tool.env ? tool.env(binDir) : {};
+  for (const dep of tool.requires || []) {
+    const depEnv = getProvisionedEnv(dep);
+    if (depEnv) {
+      pathDirs.push(...depEnv.pathDirs);
+      vars = { ...depEnv.vars, ...vars };
+    }
+  }
+  return { pathDirs, vars };
+}
+
+// Concurrent runs of the same repo type share one download.
+const inFlight = new Map();
+
+/**
+ * Make sure `name` is available, downloading it on first use. Returns
+ * { pathDirs, vars } to merge into the child process environment.
+ */
+export async function ensureTool(name, onOutput) {
+  const tool = TOOLS[name];
+  if (!tool) throw new Error(`Unknown tool: ${name}`);
+  for (const dep of tool.requires || []) await ensureTool(dep, onOutput);
+  if (isProvisioned(name)) return getProvisionedEnv(name);
+  if (!inFlight.has(name)) {
+    inFlight.set(name, provision(name, onOutput).finally(() => inFlight.delete(name)));
+  }
+  await inFlight.get(name);
+  return getProvisionedEnv(name);
+}
+
+async function provision(name, onOutput) {
+  const tool = TOOLS[name];
+  const urlSpec = tool.urls[PLATFORM];
+  if (!urlSpec) {
+    throw new Error(`${tool.label} can't be auto-installed on ${PLATFORM}. Please install it manually.`);
+  }
+  const url = typeof urlSpec === 'function' ? await urlSpec() : urlSpec;
+  const toolDir = join(PROVISION_DIR, name);
+  mkdirSync(toolDir, { recursive: true });
+
+  onOutput?.(`\n${tool.icon} ${tool.label} not found — downloading it (one-time setup)...\n`);
+  let binDir;
+  if (tool.install) {
+    binDir = await tool.install({ url, toolDir, tool, onOutput });
+  } else {
+    const archiveExt = tool.archive || archiveExtOf(url);
+    const archivePath = join(PROVISION_DIR, `${name}-download${archiveExt}`);
+    try {
+      await downloadFile(url, archivePath, onOutput);
+      onOutput?.(`  Extracting ${tool.label}...\n`);
+      await extractArchive(archivePath, toolDir);
+    } finally {
+      try { unlinkSync(archivePath); } catch {}
+    }
+    binDir = findBinDir(toolDir, tool.bin);
+    if (!binDir) throw new Error(`${tool.label} downloaded, but ${tool.bin} wasn't found inside it.`);
+    if (!IS_WIN) makeExecutable(binDir);
+  }
+  if (tool.setup) await tool.setup({ binDir, onOutput });
+
+  writeFileSync(markerPath(name), JSON.stringify({
+    binDir: relative(PROVISION_DIR, binDir), url, provisionedAt: new Date().toISOString(), platform: PLATFORM,
+  }));
+  onOutput?.(`✅ ${tool.label} ready.\n\n`);
+}
+
+function archiveExtOf(url) {
+  if (url.endsWith('.tar.gz') || url.endsWith('.tgz')) return '.tar.gz';
+  if (url.endsWith('.7z')) return '.7z';
+  return '.zip';
+}
+
+/** Breadth-first search for the directory holding `binName`. */
+function findBinDir(root, binName, maxDepth = 5) {
+  let level = [root];
+  for (let depth = 0; depth <= maxDepth && level.length; depth++) {
+    const next = [];
+    for (const dir of level) {
+      if (existsSync(join(dir, binName))) return dir;
+      try {
+        for (const e of readdirSync(dir, { withFileTypes: true })) {
+          if (e.isDirectory() && !e.name.startsWith('.')) next.push(join(dir, e.name));
+        }
+      } catch {
+        // unreadable — skip
+      }
+    }
+    level = next;
+  }
+  return null;
+}
+
+function makeExecutable(binDir) {
+  try {
+    for (const f of readdirSync(binDir)) chmodSync(join(binDir, f), 0o755);
+  } catch {
+    // best effort
+  }
 }
 
 /**
- * Get the path to provisioned pip.
+ * Download a file, following redirects, with throttled progress output.
  */
-export function getProvisionedPipPath() {
-  if (!isPythonProvisioned()) return null;
-  const pythonPath = getProvisionedPythonPath();
-  return `"${pythonPath}" -m pip`;
-}
-
-/**
- * Download a file with progress reporting.
- */
-function downloadFile(url, destPath, onProgress) {
+function downloadFile(url, destPath, onOutput) {
   return new Promise((resolve, reject) => {
-    const proto = url.startsWith('https') ? https : http;
-
-    const doDownload = (downloadUrl) => {
-      proto.get(downloadUrl, (res) => {
-        // Handle redirects
+    const get = (target, redirectsLeft) => {
+      const proto = target.startsWith('https') ? https : http;
+      proto.get(target, { headers: { 'User-Agent': 'repo-runner' } }, (res) => {
         if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-          return doDownload(res.headers.location);
+          res.resume();
+          if (redirectsLeft <= 0) return reject(new Error('Too many redirects'));
+          return get(new URL(res.headers.location, target).toString(), redirectsLeft - 1);
         }
-
         if (res.statusCode !== 200) {
-          reject(new Error(`Download failed: HTTP ${res.statusCode}`));
-          return;
+          res.resume();
+          return reject(new Error(`Download failed: HTTP ${res.statusCode} for ${target}`));
         }
 
-        const totalBytes = parseInt(res.headers['content-length'] || '0', 10);
-        let downloadedBytes = 0;
-
-        const fileStream = createWriteStream(destPath);
+        const total = parseInt(res.headers['content-length'] || '0', 10);
+        let done = 0;
+        let lastPct = -10;
         res.on('data', (chunk) => {
-          downloadedBytes += chunk.length;
-          if (totalBytes > 0) {
-            const pct = Math.round((downloadedBytes / totalBytes) * 100);
-            onProgress?.(`  Downloading... ${pct}% (${(downloadedBytes / 1024 / 1024).toFixed(1)}MB)\r`);
+          done += chunk.length;
+          if (!total) return;
+          const pct = Math.floor((done / total) * 100);
+          if (pct >= lastPct + 10) {
+            lastPct = pct;
+            onOutput?.(`  Downloading... ${pct}% (${(done / 1048576).toFixed(0)} of ${(total / 1048576).toFixed(0)} MB)\n`);
           }
         });
-        res.pipe(fileStream);
-        fileStream.on('finish', () => {
-          fileStream.close();
-          onProgress?.(`  Download complete (${(downloadedBytes / 1024 / 1024).toFixed(1)}MB)\n`);
-          resolve();
-        });
-        fileStream.on('error', reject);
+        const file = createWriteStream(destPath);
+        res.pipe(file);
+        file.on('finish', () => file.close(() => resolve()));
+        file.on('error', reject);
+        res.on('error', reject);
       }).on('error', reject);
     };
+    get(url, 10);
+  });
+}
 
-    doDownload(url);
+/** Run a command without blocking the server. Resolves { code, output }. */
+function runAsync(cmd, args, opts = {}) {
+  return new Promise((resolve) => {
+    let output = '';
+    const proc = spawn(cmd, args, { ...opts, stdio: ['ignore', 'pipe', 'pipe'] });
+    proc.stdout.on('data', (d) => { output += d; });
+    proc.stderr.on('data', (d) => { output += d; });
+    proc.on('error', (err) => resolve({ code: -1, output: err.message }));
+    proc.on('exit', (code) => resolve({ code, output }));
   });
 }
 
 /**
- * Extract a zip file (Windows).
+ * Extract zip / 7z / tar.gz. On Windows the built-in bsdtar (System32\tar.exe)
+ * handles all three and is far faster than Expand-Archive on big toolchains.
  */
-function extractZip(zipPath, destDir) {
-  // Use PowerShell's built-in Expand-Archive
-  execSync(
-    `powershell -NoProfile -Command "Expand-Archive -Force -Path '${zipPath}' -DestinationPath '${destDir}'"`,
-    { stdio: 'ignore', timeout: 120000 }
-  );
-}
-
-/**
- * Provision Python automatically.
- * Downloads the embeddable package and sets up pip.
- */
-export async function provisionPython(onOutput) {
-  if (isPythonProvisioned()) {
-    const pythonPath = getProvisionedPythonPath();
-    onOutput?.(`✓ Python already provisioned at ${pythonPath}\n`);
-    return pythonPath;
-  }
-
-  const isWin = process.platform === 'win32';
-  const arch = process.arch;
-  const platformKey = `${process.platform}-${arch}`;
-
-  if (!isWin) {
-    // For now, auto-provisioning only supports Windows embeddable package
-    // Linux/macOS users typically have Python installed or can install easily
-    throw new Error(
-      'Auto-provisioning Python is only supported on Windows. ' +
-      'Please install Python manually: https://www.python.org/downloads/'
-    );
-  }
-
-  const downloadUrl = PYTHON_URLS[platformKey];
-  if (!downloadUrl) {
-    throw new Error(`No Python download available for ${platformKey}`);
-  }
-
-  onOutput?.(`\n🐍 Python not found — auto-downloading Python ${PYTHON_VERSION}...\n`);
-
-  // Create directories
-  mkdirSync(PYTHON_DIR, { recursive: true });
-
-  const zipPath = join(PROVISION_DIR, `python-${PYTHON_VERSION}.zip`);
-
-  try {
-    // Step 1: Download Python embeddable package
-    onOutput?.(`  Downloading from python.org...\n`);
-    await downloadFile(downloadUrl, zipPath, onOutput);
-
-    // Step 2: Extract
-    onOutput?.(`  Extracting Python...\n`);
-    extractZip(zipPath, PYTHON_DIR);
-
-    // Step 3: Enable pip by modifying the ._pth file
-    // The embeddable package ships with a python3XX._pth that blocks pip
-    const pthFiles = require('fs').readdirSync(PYTHON_DIR).filter(f => f.endsWith('._pth'));
-    for (const pthFile of pthFiles) {
-      const pthPath = join(PYTHON_DIR, pthFile);
-      let content = readFileSync(pthPath, 'utf8');
-      // Uncomment 'import site' to enable pip
-      content = content.replace(/^#\s*import site/m, 'import site');
-      // Also add Lib\site-packages
-      if (!content.includes('Lib\\site-packages')) {
-        content += '\nLib\\site-packages\n';
-      }
-      writeFileSync(pthPath, content);
+async function extractArchive(archivePath, destDir) {
+  mkdirSync(destDir, { recursive: true });
+  let r;
+  if (IS_WIN) {
+    const bsdtar = join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'tar.exe');
+    if (existsSync(bsdtar)) {
+      r = await runAsync(bsdtar, ['-xf', archivePath, '-C', destDir]);
+      if (r.code === 0) return;
     }
-
-    // Step 4: Download and install pip
-    onOutput?.(`  Installing pip...\n`);
-    const getPipPath = join(PROVISION_DIR, 'get-pip.py');
-    await downloadFile(GET_PIP_URL, getPipPath, onOutput);
-
-    const pythonExe = join(PYTHON_DIR, 'python.exe');
-    execSync(`"${pythonExe}" "${getPipPath}" --no-warn-script-location`, {
-      cwd: PYTHON_DIR,
-      stdio: 'pipe',
-      timeout: 120000,
-    });
-
-    // Step 5: Install venv support (needed for isolated project environments)
-    onOutput?.(`  Setting up virtual environment support...\n`);
-
-    // Step 6: Mark as provisioned
-    writeFileSync(PYTHON_MARKER, JSON.stringify({
-      version: PYTHON_VERSION,
-      provisionedAt: new Date().toISOString(),
-      platform: platformKey,
-    }));
-
-    // Clean up zip
-    try { unlinkSync(zipPath); } catch {}
-    try { unlinkSync(join(PROVISION_DIR, 'get-pip.py')); } catch {}
-
-    onOutput?.(`\n✅ Python ${PYTHON_VERSION} installed successfully!\n`);
-    onOutput?.(`  Location: ${PYTHON_DIR}\n\n`);
-
-    return pythonExe;
-  } catch (err) {
-    onOutput?.(`\n❌ Failed to provision Python: ${err.message}\n`);
-    // Clean up on failure
-    try { unlinkSync(zipPath); } catch {}
-    throw err;
+    if (archivePath.endsWith('.zip')) {
+      r = await runAsync('powershell', ['-NoProfile', '-Command',
+        `Expand-Archive -Force -LiteralPath '${archivePath}' -DestinationPath '${destDir}'`]);
+    }
+  } else if (archivePath.endsWith('.zip')) {
+    r = await runAsync('unzip', ['-q', '-o', archivePath, '-d', destDir]);
+  } else {
+    r = await runAsync('tar', ['-xf', archivePath, '-C', destDir]);
   }
+  if (r?.code !== 0) throw new Error(`Couldn't extract ${archivePath}: ${(r?.output || '').slice(-300)}`);
 }
 
-// ─── Go Provisioning ───
-// Go ships as a self-contained portable archive (no build tools needed), so it
-// auto-provisions cleanly the same way Python does.
+// ─── Tool-specific setup ───
 
-const GO_VERSION = '1.23.4';
-const GO_DIR = join(PROVISION_DIR, 'go');
-const GO_MARKER = join(GO_DIR, '.provisioned');
-const GO_URLS = {
-  'win32-x64': `https://go.dev/dl/go${GO_VERSION}.windows-amd64.zip`,
-  'linux-x64': `https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz`,
-  'darwin-x64': `https://go.dev/dl/go${GO_VERSION}.darwin-amd64.tar.gz`,
-  'darwin-arm64': `https://go.dev/dl/go${GO_VERSION}.darwin-arm64.tar.gz`,
-};
-
-export function isGoProvisioned() {
-  return existsSync(GO_MARKER);
+async function resolvePhpUrl() {
+  const tmp = join(PROVISION_DIR, 'php-releases.json');
+  mkdirSync(PROVISION_DIR, { recursive: true });
+  await downloadFile('https://downloads.php.net/~windows/releases/releases.json', tmp);
+  const releases = JSON.parse(readFileSync(tmp, 'utf8'));
+  try { unlinkSync(tmp); } catch {}
+  const branch = releases[PHP_BRANCH];
+  const build = branch?.['nts-vs16-x64'] || branch?.['nts-vs17-x64'];
+  if (!build?.zip?.path) throw new Error(`No Windows build listed for PHP ${PHP_BRANCH}`);
+  return `https://downloads.php.net/~windows/releases/${build.zip.path}`;
 }
 
-/** Path to the provisioned `go` binary (the archive extracts a `go/` folder). */
-export function getProvisionedGoPath() {
-  if (!isGoProvisioned()) return null;
-  const isWin = process.platform === 'win32';
-  return join(GO_DIR, 'go', 'bin', isWin ? 'go.exe' : 'go');
-}
-
-export async function provisionGo(onOutput) {
-  if (isGoProvisioned()) return getProvisionedGoPath();
-
-  const isWin = process.platform === 'win32';
-  const key = `${process.platform}-${process.arch}`;
-  const url = GO_URLS[key];
-  if (!url) throw new Error(`No Go download available for ${key}.`);
-  if (!isWin) {
-    throw new Error('Auto-provisioning Go is currently Windows-only. Install Go: https://go.dev/dl/');
+/** Create php.ini with the extensions typical apps need, and add Composer. */
+async function setupPhp({ binDir, onOutput }) {
+  const iniSrc = join(binDir, 'php.ini-development');
+  if (existsSync(iniSrc)) {
+    let ini = readFileSync(iniSrc, 'utf8');
+    ini = ini.replace(/^;\s*extension_dir\s*=\s*"ext"/m, 'extension_dir = "ext"');
+    for (const ext of ['curl', 'fileinfo', 'gd', 'intl', 'mbstring', 'openssl', 'pdo_mysql', 'pdo_pgsql', 'pdo_sqlite', 'sqlite3', 'zip', 'sodium']) {
+      ini = ini.replace(new RegExp(`^;\\s*extension=${ext}\\s*$`, 'm'), `extension=${ext}`);
+    }
+    writeFileSync(join(binDir, 'php.ini'), ini);
   }
-
-  onOutput?.(`\n🔵 Go not found — auto-downloading Go ${GO_VERSION}...\n`);
-  mkdirSync(GO_DIR, { recursive: true });
-  const zipPath = join(PROVISION_DIR, `go-${GO_VERSION}.zip`);
-  try {
-    await downloadFile(url, zipPath, onOutput);
-    onOutput?.(`  Extracting Go...\n`);
-    extractZip(zipPath, GO_DIR); // extracts a top-level `go/` folder
-    writeFileSync(GO_MARKER, JSON.stringify({ version: GO_VERSION, provisionedAt: new Date().toISOString() }));
-    try { unlinkSync(zipPath); } catch {}
-    onOutput?.(`\n✅ Go ${GO_VERSION} installed!\n`);
-    return getProvisionedGoPath();
-  } catch (err) {
-    onOutput?.(`\n❌ Failed to provision Go: ${err.message}\n`);
-    try { unlinkSync(zipPath); } catch {}
-    throw err;
-  }
+  onOutput?.('  Adding Composer...\n');
+  await downloadFile('https://getcomposer.org/download/latest-stable/composer.phar', join(binDir, 'composer.phar'), onOutput);
+  writeFileSync(join(binDir, 'composer.bat'), '@php "%~dp0composer.phar" %*\r\n');
 }
 
 /**
- * Invalidate the runtime cache (call after provisioning).
+ * Install Rust into .runtimes/rust via rustup-init. On Windows without the
+ * MSVC build tools, use the GNU toolchain, which ships its own linker.
  */
-export function invalidateRuntimeCache() {
-  // This is imported and called from native-runner.js
+async function installRust({ url, toolDir, tool, onOutput }) {
+  const initPath = join(toolDir, exe('rustup-init'));
+  await downloadFile(url, initPath, onOutput);
+  if (!IS_WIN) chmodSync(initPath, 0o755);
+
+  const args = ['-y', '--no-modify-path', '--profile', 'minimal', '--default-toolchain', 'stable'];
+  if (IS_WIN && !hasMsvcBuildTools()) args.push('--default-host', 'x86_64-pc-windows-gnu');
+
+  onOutput?.('  Installing the stable toolchain (this takes a minute)...\n');
+  const r = await runAsync(initPath, args, { env: { ...process.env, ...tool.env() } });
+  if (r.code !== 0) throw new Error(`rustup-init failed: ${r.output.slice(-500)}`);
+  try { unlinkSync(initPath); } catch {}
+  return join(toolDir, 'cargo', 'bin');
+}
+
+function hasMsvcBuildTools() {
+  const vswhere = join(process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)', 'Microsoft Visual Studio', 'Installer', 'vswhere.exe');
+  if (!existsSync(vswhere)) return false;
+  try {
+    const out = execSync(`"${vswhere}" -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`, { stdio: 'pipe' });
+    return out.toString().trim().length > 0;
+  } catch {
+    return false;
+  }
 }

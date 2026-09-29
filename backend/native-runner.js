@@ -1,28 +1,37 @@
 // Native process runner — runs projects directly on the host machine
-// without Docker. Supports Python, Go, Rust, Ruby, PHP, Java, .NET.
-// Falls back to Docker sandbox if the runtime isn't installed locally.
+// without Docker. Runtimes that aren't installed (Python, Go, Java, PHP, Ruby,
+// Rust, C/C++, Bun, Deno) are downloaded on first use by auto-provision.js.
 
 import { spawn, execSync } from 'child_process';
-import { join, relative, dirname, delimiter } from 'path';
-import { writeFileSync, existsSync, copyFileSync, readdirSync, readFileSync } from 'fs';
-import { createConnection } from 'net';
+import { createServer } from 'http';
+import { join, relative, delimiter, basename, extname, resolve, sep } from 'path';
 import {
-  isPythonProvisioned,
-  getProvisionedPythonPath,
-  getProvisionedPipPath,
-  provisionPython,
-  isGoProvisioned,
-  getProvisionedGoPath,
-  provisionGo,
-} from './auto-provision.js';
+  writeFileSync, existsSync, copyFileSync, readdirSync, readFileSync, statSync, renameSync, createReadStream, rmSync,
+} from 'fs';
+import { createConnection } from 'net';
+import { ensureTool, canProvision } from './auto-provision.js';
 
 // Track active native sessions
 const nativeSessions = new Map();
 
+const IS_WIN = process.platform === 'win32';
 const PORT_RANGE_START = 10000;
 const PORT_RANGE_END = 11000;
 const usedPorts = new Set();
-const SESSION_TIMEOUT_MS = 10 * 60 * 1000; // 10 min
+const SESSION_TIMEOUT_MS = 30 * 60 * 1000; // 30 min
+// Keep watching for a web server this long after the initial wait gives up,
+// so slow starters (Spring Boot, first-time builds) still get a preview.
+const LATE_PORT_WINDOW_MS = 20 * 60 * 1000;
+// The runner's own ports — an app printing these (e.g. a CORS origin) must not
+// be mistaken for the app's server.
+const RESERVED_PORTS = new Set([Number(process.env.PORT) || 3001, 5173]);
+
+// cmd.exe may be configured (NoDefaultCurrentDirectoryInExePath) not to run
+// programs from the current folder by bare name, so always give a path.
+const local = (file) => (IS_WIN ? `.\\${file}` : `./${file}`);
+
+const VENV_PYTHON = IS_WIN ? join('.venv', 'Scripts', 'python.exe') : join('.venv', 'bin', 'python');
+const venvBin = (name) => (IS_WIN ? join('.venv', 'Scripts', `${name}.exe`) : join('.venv', 'bin', name));
 
 function getAvailablePort() {
   for (let p = PORT_RANGE_START; p < PORT_RANGE_END; p++) {
@@ -38,19 +47,20 @@ function releasePort(port) {
   usedPorts.delete(port);
 }
 
-/**
- * Check if a command is available on the host system.
- * On Windows, `where` can return paths to Windows Store stub executables
- * that aren't real installations, so we try running the command with --version.
- */
+const _commandCache = new Map();
+
+/** Is `command` on PATH? Cached; cleared with clearRuntimeCache(). */
 function isCommandAvailable(command) {
+  if (_commandCache.has(command)) return _commandCache.get(command);
+  let found;
   try {
-    const check = process.platform === 'win32' ? `where ${command}` : `which ${command}`;
-    execSync(check, { stdio: 'ignore' });
-    return true;
+    execSync(IS_WIN ? `where ${command}` : `command -v ${command}`, { stdio: 'ignore' });
+    found = true;
   } catch {
-    return false;
+    found = false;
   }
+  _commandCache.set(command, found);
+  return found;
 }
 
 /**
@@ -59,126 +69,152 @@ function isCommandAvailable(command) {
  */
 function isPythonReal(command) {
   try {
-    const result = execSync(`${command} --version`, {
-      stdio: ['ignore', 'pipe', 'pipe'],
-      timeout: 5000,
-    });
-    const output = result.toString().trim();
-    return output.toLowerCase().startsWith('python');
+    const result = execSync(`${command} --version`, { stdio: ['ignore', 'pipe', 'pipe'], timeout: 5000 });
+    return result.toString().trim().toLowerCase().startsWith('python');
   } catch {
     return false;
   }
 }
 
-/**
- * Get the Python executable name.
- * Checks: py (Windows launcher) > python3 > python
- * Validates each by running --version to skip Windows Store stubs.
- */
 function getPythonCmd() {
-  // On Windows, the `py` launcher is the most reliable way
-  if (process.platform === 'win32') {
-    if (isPythonReal('py')) return 'py';
-  }
+  if (IS_WIN && isPythonReal('py')) return 'py';
   if (isPythonReal('python3')) return 'python3';
   if (isPythonReal('python')) return 'python';
   return null;
 }
 
-/**
- * Get the pip executable name.
- * If using `py`, pip is invoked as `py -m pip`.
- */
-function getPipCmd(pythonCmd) {
-  if (pythonCmd === 'py') return 'py -m pip';
-  if (isCommandAvailable('pip3')) return 'pip3';
-  if (isCommandAvailable('pip')) return 'pip';
-  // Fallback: use python -m pip
-  if (pythonCmd) return `${pythonCmd} -m pip`;
-  return null;
-}
+// ─── Which tools each runtime needs ───
+// [tool to provision (null = can't be provisioned), command to look for].
 
-/**
- * Check which runtimes are available natively on this host.
- */
+const PYTHON_TOOLS = [['uv', 'uv']];
+const RUNTIME_TOOLS = {
+  'python': PYTHON_TOOLS,
+  'python-flask': PYTHON_TOOLS,
+  'python-fastapi': PYTHON_TOOLS,
+  'python-django': PYTHON_TOOLS,
+  'python-streamlit': PYTHON_TOOLS,
+  'python-gradio': PYTHON_TOOLS,
+  'python-notebook': PYTHON_TOOLS,
+  'go': [['go', 'go']],
+  'rust': [['rust', 'cargo']],
+  'ruby': [['ruby', 'ruby']],
+  'php': [['php', 'php']],
+  'java-maven': [['java', 'javac'], ['maven', 'mvn']],
+  'java-gradle': [['java', 'javac']],
+  'java': [['java', 'javac']],
+  'deno': [['deno', 'deno']],
+  'cpp': [['cpp', 'g++']],
+  'dotnet': [[null, 'dotnet']],
+  'node': [[null, 'node']],
+  'static': [],
+};
+
 let _cachedRuntimes = null;
 export function clearRuntimeCache() {
   _cachedRuntimes = null;
+  _commandCache.clear();
 }
 
+/** What's installed on this host, plus what can be auto-installed on demand. */
 export function checkNativeRuntimes() {
   if (_cachedRuntimes) return _cachedRuntimes;
 
-  let python = getPythonCmd();
-  let pip = getPipCmd(python);
-
-  // Fallback to provisioned Python if system Python is not found
-  if (!python && isPythonProvisioned()) {
-    python = getProvisionedPythonPath();
-    pip = getProvisionedPipPath();
-  }
-
+  const python = getPythonCmd();
   _cachedRuntimes = {
     python: !!python,
     pythonCmd: python,
-    pipCmd: pip,
-    go: isCommandAvailable('go') || isGoProvisioned(),
+    pipCmd: python === 'py' ? 'py -m pip' : python ? `${python} -m pip` : null,
+    go: isCommandAvailable('go'),
     rust: isCommandAvailable('cargo'),
     ruby: isCommandAvailable('ruby'),
     php: isCommandAvailable('php'),
-    java: isCommandAvailable('java'),
+    java: isCommandAvailable('javac'),
     dotnet: isCommandAvailable('dotnet'),
     node: isCommandAvailable('node'),
     cppCompiler: isCommandAvailable('g++') ? 'g++' : isCommandAvailable('clang++') ? 'clang++' : null,
+    autoInstall: ['uv', 'go', 'java', 'maven', 'gradle', 'php', 'ruby', 'rust', 'cpp', 'bun', 'deno'].filter(canProvision),
   };
   _cachedRuntimes.cpp = !!_cachedRuntimes.cppCompiler;
 
-  // Log detected runtimes on first check
   const found = Object.entries(_cachedRuntimes)
     .filter(([k, v]) => v === true && !k.endsWith('Cmd'))
     .map(([k]) => k);
   console.log(`  Native runtimes detected: ${found.length > 0 ? found.join(', ') : 'none'}`);
-  if (python) console.log(`  Python: ${python} (pip: ${pip})`);
-
+  console.log(`  Auto-installable on demand: ${_cachedRuntimes.autoInstall.join(', ') || 'none'}`);
   return _cachedRuntimes;
 }
 
-/**
- * Check if a runtime can be run natively (without Docker).
- */
+/** Can this runtime run natively — installed already, or auto-installable? */
 export function canRunNatively(runtimeId) {
-  const runtimes = checkNativeRuntimes();
-  const isWin = process.platform === 'win32';
-  
-  // Python and Go can be auto-provisioned on Windows, so they can run natively.
-  const canRunPython = runtimes.python || isWin;
-  const canRunGo = runtimes.go || isWin;
+  const tools = RUNTIME_TOOLS[runtimeId];
+  if (!tools) return false;
+  if (runtimeId === 'cpp' && (isCommandAvailable('g++') || isCommandAvailable('clang++') || isCommandAvailable('gcc'))) return true;
+  return tools.every(([tool, cmd]) => isCommandAvailable(cmd) || (tool && canProvision(tool)));
+}
 
-  const runtimeMap = {
-    'python': canRunPython,
-    'python-flask': canRunPython,
-    'python-fastapi': canRunPython,
-    'python-django': canRunPython,
-    'python-streamlit': canRunPython,
-    'python-gradio': canRunPython,
-    'go': canRunGo,
-    'rust': runtimes.rust,
-    'ruby': runtimes.ruby,
-    'php': runtimes.php,
-    'java-maven': runtimes.java,
-    'java-gradle': runtimes.java,
-    'dotnet': runtimes.dotnet,
-    'node': runtimes.node,
-    'cpp': runtimes.cpp,
-    'static': canRunPython, // served via Python's http.server
-  };
-  return runtimeMap[runtimeId] ?? false;
+/** The tools a specific checkout needs (wrappers, lockfiles and versions matter). */
+function toolsForRun(runtime, cwd) {
+  let tools = [...(RUNTIME_TOOLS[runtime.id] || [])];
+  if (runtime.id === 'node' && runtime.manager === 'bun') tools.push(['bun', 'bun']);
+  if (runtime.id === 'java-maven' && existsSync(join(cwd, IS_WIN ? 'mvnw.cmd' : 'mvnw'))) {
+    tools = tools.filter(([t]) => t !== 'maven');
+  }
+  if (runtime.id === 'java-gradle') {
+    const wrapper = readGradleWrapperVersion(cwd);
+    if (wrapper === null) tools.push(['gradle', 'gradle']);
+    // Gradle only runs on JDKs it knows: < 7.3 → 11, < 8.5 → 17.
+    else if (wrapper < 703) tools = [['java11', 'javac']];
+    else if (wrapper < 805) tools = [['java17', 'javac']];
+  }
+  if (runtime.id === 'cpp' && (isCommandAvailable('g++') || isCommandAvailable('clang++'))) tools = [];
+  // Our Windows Rust uses the GNU toolchain; crates that compile C code
+  // (via cc-rs) also need gcc and dlltool, which the MinGW toolchain provides.
+  if (runtime.id === 'rust' && IS_WIN && !isCommandAvailable('cargo')) tools.push(['cpp', 'gcc']);
+  return tools;
+}
+
+function readGradleWrapperVersion(cwd) {
+  const props = join(cwd, 'gradle', 'wrapper', 'gradle-wrapper.properties');
+  if (!existsSync(props) || !existsSync(join(cwd, IS_WIN ? 'gradlew.bat' : 'gradlew'))) return null;
+  const m = readFileSafe(props)?.match(/gradle-(\d+)\.(\d+)/);
+  return m ? Number(m[1]) * 100 + Number(m[2]) : 9999; // 8.5 → 805
+}
+
+/** Is `command` on the PATH of `env` (which may include provisioned tools)? */
+function onPath(command, env) {
+  const key = Object.keys(env).find((k) => k.toUpperCase() === 'PATH');
+  const exts = IS_WIN ? ['.exe', '.cmd', '.bat', ''] : [''];
+  return (env[key] || '').split(delimiter).some((dir) => dir && exts.some((ext) => existsSync(join(dir, command + ext))));
+}
+
+/** Put a tool's bin dirs on PATH and set its env vars (JAVA_HOME, CARGO_HOME...). */
+function applyToolEnv(processEnv, { pathDirs, vars }) {
+  Object.assign(processEnv, vars);
+  const key = Object.keys(processEnv).find((k) => k.toUpperCase() === 'PATH') || 'PATH';
+  processEnv[key] = [...pathDirs, processEnv[key] || ''].join(delimiter);
 }
 
 /**
- * Wait for a port to become reachable (server startup detection).
- * Checks both IPv4 and IPv6 via isPortOpen.
+ * Make every tool this runtime needs available in `processEnv`, downloading
+ * missing ones. Throws (with a clear message) if one can't be provided.
  */
+async function prepareToolchain({ runtime, cwd, processEnv, onOutput }) {
+  for (const [tool, cmd] of toolsForRun(runtime, cwd)) {
+    if (isCommandAvailable(cmd) && !tool?.startsWith('java1')) continue;
+    if (!tool || !canProvision(tool)) {
+      throw new Error(`${runtime.label} needs "${cmd}", which isn't installed and can't be auto-installed on this OS. Install it and try again.`);
+    }
+    applyToolEnv(processEnv, await ensureTool(tool, onOutput));
+  }
+  // Composer comes bundled with the PHP we provision; use that PHP if the
+  // system one has no Composer.
+  if (runtime.id === 'php' && existsSync(join(cwd, 'composer.json')) && !isCommandAvailable('composer') && canProvision('php')) {
+    applyToolEnv(processEnv, await ensureTool('php', onOutput));
+  }
+}
+
+// ─── Waiting for the app's web server ───
+
 function waitForPort(port, timeoutMs = 30000) {
   return new Promise((resolve, reject) => {
     const start = Date.now();
@@ -215,15 +251,13 @@ async function isPortOpen(port) {
   return tryConnect(port, '::1');
 }
 
-// Ports commonly hardcoded by dev servers, tried as a last resort. Excludes the
-// runner's own ports (3001 backend, 5173 Vite) to avoid false positives.
-const COMMON_APP_PORTS = [4000, 3000, 5000, 8000, 8080, 8501, 9000, 5000, 3333];
+// Ports commonly hardcoded by dev servers, tried as a last resort.
+const COMMON_APP_PORTS = [4000, 3000, 5000, 8000, 8080, 8501, 8888, 9000, 4200, 3333];
 
 /**
  * Watch app output for a port it announces (e.g. "http://localhost:4000",
- * "listening on port 4000"). Returns a live Set that fills as output streams,
- * plus a scanner to feed each chunk through. Only local URLs count, so a
- * printed DB/API URL the app *connects to* isn't mistaken for its own port.
+ * "listening on port 4000"). Only local URLs count, so a printed DB/API URL
+ * the app *connects to* isn't mistaken for its own port.
  */
 function createPortObserver() {
   const ports = new Set();
@@ -238,7 +272,7 @@ function createPortObserver() {
       let m;
       while ((m = re.exec(text))) {
         const p = Number(m[1]);
-        if (p > 0 && p < 65536) ports.add(p);
+        if (p > 0 && p < 65536 && !RESERVED_PORTS.has(p)) ports.add(p);
       }
     }
   };
@@ -248,9 +282,9 @@ function createPortObserver() {
 /**
  * Wait for the app's server to come up. Prefers the port we allocated (apps
  * that respect $PORT), then any port announced in the app's output, then a
- * short list of common hardcoded ports. Returns the port that opened.
+ * short list of common hardcoded ports. Gives up early if the process exits.
  */
-async function waitForServer({ hostPort, observedPorts, timeoutMs = 60000, onOutput }) {
+async function waitForServer({ hostPort, observedPorts, timeoutMs = 90000, onOutput, exitInfo }) {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
     for (const p of [hostPort, ...observedPorts]) {
@@ -261,9 +295,9 @@ async function waitForServer({ hostPort, observedPorts, timeoutMs = 60000, onOut
         return p;
       }
     }
+    if (exitInfo?.code !== undefined) return null;
     await new Promise((r) => setTimeout(r, 500));
   }
-  // Last resort: scan common ports the app may have hardcoded.
   for (const p of COMMON_APP_PORTS) {
     if (p === hostPort) continue;
     if (await isPortOpen(p)) {
@@ -274,20 +308,37 @@ async function waitForServer({ hostPort, observedPorts, timeoutMs = 60000, onOut
   return null;
 }
 
-/**
- * Spawn a command and stream output.
- * Returns a promise that resolves when the process exits.
- */
+/** After the initial wait, keep polling so a slow server still gets a preview. */
+function watchForLatePort({ sessionId, session, hostPort, observer, exitInfo, onOutput, onReady }) {
+  const deadline = Date.now() + LATE_PORT_WINDOW_MS;
+  const tick = async () => {
+    if (nativeSessions.get(sessionId) !== session || exitInfo.code !== undefined || Date.now() > deadline) return;
+    for (const p of [hostPort, ...observer.ports]) {
+      if (await isPortOpen(p)) {
+        session.hostPort = p;
+        onOutput(`\n[ready] App is now live on port ${p}!\n`);
+        onReady?.(p);
+        return;
+      }
+    }
+    setTimeout(tick, 2000);
+  };
+  setTimeout(tick, 2000);
+}
+
+// ─── Spawning ───
+
+/** Quote an argument for the shell if it contains spaces (e.g. "Git Runner"). */
+function q(arg) {
+  const s = String(arg);
+  return /\s/.test(s) && !/^".*"$/.test(s) ? `"${s}"` : s;
+}
+
+/** Run a command to completion, streaming output. Resolves { code }. */
 function spawnWithOutput(cmd, args, opts, onOutput) {
   return new Promise((resolve, reject) => {
     onOutput(`$ ${cmd} ${args.join(' ')}\n`);
-
-    const proc = spawn(cmd, args, {
-      ...opts,
-      stdio: ['ignore', 'pipe', 'pipe'],
-      shell: true,
-    });
-
+    const proc = spawn(q(cmd), args.map(q), { ...opts, stdio: ['ignore', 'pipe', 'pipe'], shell: true });
     proc.stdout.on('data', (data) => onOutput(data.toString()));
     proc.stderr.on('data', (data) => onOutput(data.toString()));
     proc.on('error', (err) => reject(err));
@@ -295,146 +346,231 @@ function spawnWithOutput(cmd, args, opts, onOutput) {
   });
 }
 
+/** Run a step and throw if it fails. */
+async function mustRun(cmd, args, opts, onOutput, what) {
+  const { code } = await spawnWithOutput(cmd, args, opts, onOutput);
+  if (code !== 0) throw new Error(`${what} failed (exit code ${code}). See the output above.`);
+}
+
 /**
- * Install a single service's dependencies in `cwd`.
- * Shared by the single-app and compound (multi-service) run paths.
+ * Spawn a long-running app process and stream its output. stdin stays open so
+ * console programs can read what the user types in the terminal.
  */
-async function installDeps({ runtime, cwd, processEnv, runtimes, onOutput }) {
-  const isWin = process.platform === 'win32';
+function spawnApp({ startCmd, startArgs, cwd, processEnv, onOutput }) {
+  onOutput(`$ ${startCmd} ${startArgs.join(' ')}\n`);
+  const proc = spawn(q(startCmd), startArgs.map(q), {
+    cwd,
+    stdio: ['pipe', 'pipe', 'pipe'],
+    env: processEnv,
+    shell: true,
+  });
+  proc.stdout.on('data', (data) => onOutput(data.toString()));
+  proc.stderr.on('data', (data) => onOutput(data.toString()));
+  proc.stdin.on('error', () => {}); // writing after the program exits
+  proc.on('error', (err) => onOutput(`\n[error] Process error: ${err.message}\n`));
+  proc.on('exit', (code) => onOutput(`\n\x1b[2m[process exited with code ${code}]\x1b[0m\n`));
+  return proc;
+}
+
+// ─── Installing dependencies / building ───
+
+/**
+ * Install a service's dependencies (and build it, for compiled languages).
+ * Returns a `prepared` object that buildStartCommand uses (e.g. the compiled
+ * program's path or the Java main class).
+ */
+async function installDeps({ runtime, cwd, processEnv, onOutput }) {
+  const opts = { cwd, env: processEnv };
   switch (runtime.id) {
     case 'python':
     case 'python-flask':
     case 'python-fastapi':
     case 'python-django':
     case 'python-streamlit':
-    case 'python-gradio': {
-      if (!runtimes.python) {
-        await provisionPython(onOutput);
-        clearRuntimeCache();
-        Object.assign(runtimes, checkNativeRuntimes());
+    case 'python-gradio':
+    case 'python-notebook':
+      return installPython({ runtime, cwd, processEnv, onOutput });
+
+    case 'node': {
+      const [cmd, ...pre] = nodeManagerCommand(runtime.manager || 'npm');
+      const { code } = await spawnWithOutput(cmd, [...pre, 'install'], opts, onOutput);
+      // npm 7+ refuses conflicting peer deps that older projects shipped with.
+      if (code !== 0 && cmd === 'npm') {
+        onOutput('\n[install] Retrying with --legacy-peer-deps...\n');
+        await spawnWithOutput('npm', ['install', '--legacy-peer-deps'], opts, onOutput);
       }
-      const python = runtimes.pythonCmd || 'python';
-      onOutput(`\n[setup] Setting up Python virtual environment (using: ${python})...\n`);
-      if (!existsSync(join(cwd, '.venv'))) {
-        await spawnWithOutput(python, ['-m', 'venv', '.venv'], { cwd, env: processEnv }, onOutput);
-      }
-      const venvPip = isWin ? join('.venv', 'Scripts', 'pip.exe') : join('.venv', 'bin', 'pip');
-      // Match requirements.txt and common variants/typos (requirments.txt,
-      // requirement.txt, requirements-dev.txt, ...) so deps still install.
-      const reqFile = findRequirementsFile(cwd);
-      if (reqFile) {
-        await spawnWithOutput(venvPip, ['install', '-r', reqFile], { cwd, env: processEnv }, onOutput);
-      } else if (existsSync(join(cwd, 'pyproject.toml'))) {
-        await spawnWithOutput(venvPip, ['install', '.'], { cwd, env: processEnv }, onOutput);
-      } else {
-        // No manifest — install the third-party packages the code imports so
-        // scripts (e.g. ML pipelines) don't die on ModuleNotFoundError.
-        const pkgs = inferPipPackages(cwd);
-        if (pkgs.length) {
-          onOutput(`\n[install] No requirements file — installing inferred packages: ${pkgs.join(', ')}\n`);
-          await spawnWithOutput(venvPip, ['install', ...pkgs], { cwd, env: processEnv }, onOutput);
-        }
-      }
-      if (runtime.id === 'python-fastapi') {
-        await spawnWithOutput(venvPip, ['install', 'uvicorn'], { cwd, env: processEnv }, onOutput);
-      }
-      if (runtime.id === 'python-streamlit') {
-        await spawnWithOutput(venvPip, ['install', 'streamlit'], { cwd, env: processEnv }, onOutput);
-      }
-      if (runtime.id === 'python-gradio') {
-        await spawnWithOutput(venvPip, ['install', 'gradio'], { cwd, env: processEnv }, onOutput);
-      }
-      break;
+      return {};
     }
+
+    case 'deno':
+      return {};
+
     case 'go':
-      // Auto-provision Go if it isn't installed, then put it on PATH.
-      if (!isCommandAvailable('go')) {
-        const goPath = isGoProvisioned() ? getProvisionedGoPath() : await provisionGo(onOutput);
-        processEnv.PATH = `${dirname(goPath)}${delimiter}${processEnv.PATH || process.env.PATH || ''}`;
-        clearRuntimeCache();
-      }
-      await spawnWithOutput('go', ['mod', 'download'], { cwd, env: processEnv }, onOutput);
-      break;
+      if (existsSync(join(cwd, 'go.mod'))) await spawnWithOutput('go', ['mod', 'download'], opts, onOutput);
+      return { goTarget: findGoMain(cwd) };
+
     case 'rust':
-      await spawnWithOutput('cargo', ['build', '--release'], { cwd, env: processEnv }, onOutput);
-      break;
+      await mustRun('cargo', ['build', '--release'], opts, onOutput, 'cargo build');
+      return {};
+
     case 'ruby':
-      if (existsSync(join(cwd, 'Gemfile'))) {
-        await spawnWithOutput('bundle', ['install'], { cwd, env: processEnv }, onOutput);
-      }
-      break;
-    case 'node':
-      await spawnWithOutput('npm', ['install'], { cwd, env: processEnv }, onOutput);
-      break;
+      // Ruby 1.9+ dropped '.' from the load path; older apps `require` their
+      // own files by bare name (require 'helpers').
+      processEnv.RUBYLIB = [cwd, join(cwd, 'lib'), processEnv.RUBYLIB].filter(Boolean).join(delimiter);
+      return installRuby({ runtime, cwd, opts, onOutput });
+
+    case 'php':
+      return installPhp({ runtime, cwd, opts, onOutput });
+
+    case 'java-maven':
+      return installMaven({ runtime, cwd, opts, onOutput });
+
+    case 'java-gradle':
+      return installGradle({ runtime, cwd, opts, onOutput });
+
+    case 'java':
+      return compilePlainJava({ cwd, opts, onOutput });
+
+    case 'dotnet':
+      fixDotnetGlobalJson(cwd, onOutput);
+      return {};
+
+    case 'cpp':
+      return buildCpp({ cwd, opts, onOutput });
+
     default:
-      if (runtime.install) {
-        const [cmd, ...args] = runtime.install.split(' ');
-        await spawnWithOutput(cmd, args, { cwd, env: processEnv }, onOutput);
-      }
+      return {};
   }
 }
 
-/**
- * Build the [command, args] to start a service on `hostPort`.
- * May set port-related vars on `processEnv` (e.g. Flask, Next.js read PORT).
- */
-function buildStartCommand({ runtime, hostPort, processEnv }) {
-  const isWin = process.platform === 'win32';
-  const venvPython = isWin ? join('.venv', 'Scripts', 'python.exe') : join('.venv', 'bin', 'python');
-  switch (runtime.id) {
-    case 'python-flask':
-      processEnv.FLASK_RUN_PORT = String(hostPort);
-      processEnv.FLASK_RUN_HOST = '0.0.0.0';
-      return { startCmd: venvPython, startArgs: [runtime.start?.split(' ').pop() || 'app.py'] };
-    case 'python-fastapi': {
-      const venvUvicorn = isWin ? join('.venv', 'Scripts', 'uvicorn.exe') : join('.venv', 'bin', 'uvicorn');
-      const modulePart = runtime.start?.match(/uvicorn\s+(\S+)/)?.[1] || 'main:app';
-      return { startCmd: venvUvicorn, startArgs: [modulePart, '--host', '0.0.0.0', '--port', String(hostPort)] };
-    }
-    case 'python-django':
-      return { startCmd: venvPython, startArgs: ['manage.py', 'runserver', `0.0.0.0:${hostPort}`] };
-    case 'python-streamlit': {
-      const venvStreamlit = isWin ? join('.venv', 'Scripts', 'streamlit.exe') : join('.venv', 'bin', 'streamlit');
-      const appFile = runtime.start?.match(/streamlit\s+run\s+(\S+)/)?.[1] || 'app.py';
-      return { startCmd: venvStreamlit, startArgs: ['run', appFile, '--server.port', String(hostPort), '--server.headless', 'true', '--server.address', '0.0.0.0'] };
-    }
+// ── Node ──
 
-    case 'python-gradio': {
-      // Gradio reads these env vars, so `demo.launch()` binds our port/host.
-      processEnv.GRADIO_SERVER_PORT = String(hostPort);
-      processEnv.GRADIO_SERVER_NAME = '0.0.0.0';
-      const appFile = runtime.start?.split(' ').pop() || 'app.py';
-      return { startCmd: venvPython, startArgs: [appFile] };
-    }
-    case 'python':
-      return { startCmd: venvPython, startArgs: [runtime.start?.split(' ').pop() || 'main.py'] };
-    case 'go':
-      return { startCmd: 'go', startArgs: ['run', '.'] };
-    case 'rust':
-      return { startCmd: 'cargo', startArgs: ['run', '--release'] };
-    default: {
-      if (runtime.start) {
-        const parts = runtime.start.split(' ');
-        return { startCmd: parts[0], startArgs: parts.slice(1) };
-      }
-      throw new Error(`No start command configured for ${runtime.label}`);
-    }
-  }
+/** How to invoke a package manager that may not be installed globally. */
+function nodeManagerCommand(manager) {
+  if (manager === 'npm' || manager === 'bun' || isCommandAvailable(manager)) return [manager];
+  if (isCommandAvailable('corepack')) return ['corepack', manager];
+  return ['npx', '--yes', manager === 'yarn' ? 'yarn@1' : manager];
 }
 
-/** Spawn a service process and stream its output. Returns the child process. */
-function spawnApp({ startCmd, startArgs, cwd, processEnv, onOutput }) {
-  onOutput(`$ ${startCmd} ${startArgs.join(' ')}\n`);
-  const proc = spawn(startCmd, startArgs, {
-    cwd,
-    stdio: ['ignore', 'pipe', 'pipe'],
-    env: processEnv,
-    shell: true,
-  });
-  proc.stdout.on('data', (data) => onOutput(data.toString()));
-  proc.stderr.on('data', (data) => onOutput(data.toString()));
-  proc.on('error', (err) => onOutput(`\n[error] Process error: ${err.message}\n`));
-  return proc;
+// ── Python (via uv) ──
+
+/** Python version the repo asks for, else one with broad wheel support. */
+function pickPythonVersion(cwd) {
+  const pinned = readFileSafe(join(cwd, '.python-version'))?.match(/(\d+\.\d+)/)?.[1]
+    || readFileSafe(join(cwd, 'runtime.txt'))?.match(/python-(\d+\.\d+)/)?.[1];
+  let version = pinned;
+  if (!version) {
+    const req = readFileSafe(join(cwd, 'pyproject.toml'))?.match(/requires-python\s*=\s*["']([^"']+)["']/)?.[1] || '';
+    const upper = req.match(/<\s*3\.(\d+)/);
+    const lower = req.match(/>=?\s*3\.(\d+)/);
+    if (upper && Number(upper[1]) <= 12) version = `3.${Number(upper[1]) - 1}`;
+    else if (lower && Number(lower[1]) > 12) version = `3.${lower[1]}`;
+  }
+  const minor = Number(version?.split('.')[1]);
+  if (!version || !version.startsWith('3.') || minor < 8) return '3.12';
+  return version;
+}
+
+async function installPython({ runtime, cwd, processEnv, onOutput }) {
+  const opts = { cwd, env: processEnv };
+  if (!existsSync(join(cwd, '.venv'))) {
+    const version = pickPythonVersion(cwd);
+    onOutput(`\n[setup] Creating a Python ${version} environment (uv downloads Python if needed)...\n`);
+    await mustRun('uv', ['venv', '.venv', '--python', version, '--seed'], opts, onOutput, 'Creating the Python environment');
+  }
+  const pip = async (args) => (await spawnWithOutput('uv', ['pip', 'install', '--python', VENV_PYTHON, ...args], opts, onOutput)).code === 0;
+
+  // Install a package list; if resolution fails as a whole, go one by one so
+  // a single bad/unavailable package doesn't block everything else.
+  const installEach = async (pkgs) => {
+    if (!pkgs.length || (await pip(pkgs))) return;
+    onOutput('\n[install] Installing packages individually...\n');
+    for (const p of pkgs) await pip([p]);
+  };
+
+  const reqFile = findRequirementsFile(cwd);
+  if (reqFile) {
+    if (!(await pip(['-r', reqFile]))) {
+      // Old pins often have no wheels for current Python — retry unpinned.
+      onOutput('\n[install] Pinned requirements failed — retrying with version pins relaxed...\n');
+      await installEach(unpinRequirements(readFileSafe(join(cwd, reqFile)) || ''));
+    }
+  } else if (existsSync(join(cwd, 'pyproject.toml')) || existsSync(join(cwd, 'setup.py'))) {
+    if (!(await pip(['.']))) await installEach(inferPipPackages(cwd));
+  } else if (existsSync(join(cwd, 'Pipfile'))) {
+    await installEach(parsePipfile(readFileSafe(join(cwd, 'Pipfile')) || ''));
+  } else if (existsSync(join(cwd, 'environment.yml')) || existsSync(join(cwd, 'environment.yaml'))) {
+    const envFile = existsSync(join(cwd, 'environment.yml')) ? 'environment.yml' : 'environment.yaml';
+    await installEach(parseCondaEnv(readFileSafe(join(cwd, envFile)) || ''));
+  } else {
+    // No manifest — install the third-party packages the code imports so
+    // scripts (e.g. ML pipelines) don't die on ModuleNotFoundError.
+    const pkgs = inferPipPackages(cwd);
+    if (pkgs.length) {
+      onOutput(`\n[install] No requirements file — installing inferred packages: ${pkgs.join(', ')}\n`);
+      await installEach(pkgs);
+    }
+  }
+
+  const extra = {
+    'python-fastapi': ['uvicorn'],
+    'python-streamlit': ['streamlit'],
+    'python-gradio': ['gradio'],
+    'python-notebook': ['jupyterlab'],
+  }[runtime.id];
+  if (extra) await pip(extra);
+
+  if (runtime.id === 'python-django') {
+    const manage = runtime.manage || 'manage.py';
+    onOutput('\n[setup] Applying Django migrations...\n');
+    await spawnWithOutput(VENV_PYTHON, [manage, 'migrate', '--noinput'], opts, onOutput);
+    // Manifest static storage (e.g. WhiteNoise) 500s until static files are collected.
+    const settings = collectSources(cwd, new Set(['.py'])).filter((f) => /settings/.test(f));
+    if (settings.some((f) => /STATIC_ROOT/.test(readFileSafe(join(cwd, f)) || ''))) {
+      await spawnWithOutput(VENV_PYTHON, [manage, 'collectstatic', '--noinput'], opts, onOutput);
+    }
+  }
+  return {};
+}
+
+/** Requirement lines reduced to bare package names (drops ==/>= pins). */
+function unpinRequirements(text) {
+  return text
+    .split(/\r?\n/)
+    .map((l) => l.replace(/#.*/, '').trim())
+    .filter((l) => l && !l.startsWith('-'))
+    .map((l) => (/^(git\+|https?:)/.test(l) ? l : l.split(/[<>=!~;\[\s]/)[0]))
+    .filter(Boolean);
+}
+
+/** Package specs from a Pipfile's [packages] section. */
+function parsePipfile(text) {
+  const section = text.split(/^\[packages\]\s*$/m)[1]?.split(/^\[/m)[0] || '';
+  const pkgs = [];
+  for (const line of section.split(/\r?\n/)) {
+    const m = line.match(/^\s*"?([A-Za-z0-9_.\-]+)"?\s*=\s*(.+)$/);
+    if (!m) continue;
+    const spec = m[2].trim().match(/^"([^"]*)"$/)?.[1];
+    pkgs.push(spec && spec !== '*' ? `${m[1]}${spec}` : m[1]);
+  }
+  return pkgs;
+}
+
+// Conda package names that differ on PyPI (or aren't Python packages at all).
+const CONDA_TO_PIP = { pytorch: 'torch', 'py-opencv': 'opencv-python', opencv: 'opencv-python', 'tensorflow-gpu': 'tensorflow' };
+const CONDA_SKIP = /^(python|pip|cudatoolkit|cudnn|pytorch-cuda|mkl.*|libgcc.*|_libgcc.*|vc|vs\d+.*|ca-certificates|openssl|setuptools|wheel)$/;
+
+/** pip-installable names from a conda environment.yml (conda + pip sections). */
+function parseCondaEnv(text) {
+  const pkgs = [];
+  for (const line of text.split(/\r?\n/)) {
+    const m = line.match(/^\s*-\s*([A-Za-z0-9_.\-]+)(?:[=<>!].*)?\s*$/);
+    if (!m || m[1] === 'pip' || line.includes('::')) continue;
+    const name = m[1].toLowerCase();
+    if (CONDA_SKIP.test(name)) continue;
+    pkgs.push(CONDA_TO_PIP[name] || name);
+  }
+  return [...new Set(pkgs)];
 }
 
 /**
@@ -447,7 +583,6 @@ function findRequirementsFile(cwd) {
     const files = readdirSync(cwd);
     const exact = files.find((f) => f.toLowerCase() === 'requirements.txt');
     if (exact) return exact;
-    // Fuzzy: anything that starts like "requir…" and ends in .txt.
     return files.find((f) => /^requir\w*\.txt$/i.test(f)) || null;
   } catch {
     return null;
@@ -459,45 +594,52 @@ const IMPORT_TO_PIP = {
   cv2: 'opencv-python', PIL: 'pillow', sklearn: 'scikit-learn', skimage: 'scikit-image',
   bs4: 'beautifulsoup4', yaml: 'pyyaml', dotenv: 'python-dotenv', Crypto: 'pycryptodome',
   serial: 'pyserial', dateutil: 'python-dateutil', jwt: 'PyJWT', OpenGL: 'PyOpenGL',
+  telegram: 'python-telegram-bot', discord: 'discord.py', dns: 'dnspython', docx: 'python-docx',
+  pptx: 'python-pptx', fitz: 'pymupdf', attr: 'attrs', win32api: 'pywin32', magic: 'python-magic',
+  Levenshtein: 'python-Levenshtein', google: 'google-generativeai', speech_recognition: 'SpeechRecognition',
 };
 
-const PY_STDLIB = new Set([
-  'os', 'sys', 'json', 're', 'math', 'random', 'datetime', 'collections', 'itertools',
-  'functools', 'pathlib', 'typing', 'subprocess', 'threading', 'multiprocessing', 'time',
-  'logging', 'argparse', 'csv', 'io', 'glob', 'shutil', 'socket', 'http', 'urllib',
-  'unittest', 'abc', 'enum', 'dataclasses', 'asyncio', 'warnings', 'copy', 'pickle',
-  'hashlib', 'base64', 'string', 'traceback', 'contextlib', 'operator', 'tempfile',
-  'uuid', 'decimal', 'statistics', 'queue', 'signal', 'platform', 'inspect', 'importlib',
-  'ast', 'types', 'textwrap', 'struct', 'array', 'bisect', 'heapq', 'weakref', 'gc',
-  'ctypes', 'sqlite3', 'xml', 'html', 'email', 'ssl', 'select', 'fnmatch', '__future__',
-  'concurrent', 'secrets', 'getpass', 'zipfile', 'tarfile', 'binascii', 'codecs',
-]);
+const PY_STDLIB = new Set(`
+  __future__ __main__ _thread abc argparse array ast asyncio atexit base64 bisect builtins bz2 calendar
+  cmath code codecs codeop collections colorsys concurrent configparser contextlib contextvars copy copyreg
+  cProfile csv ctypes curses dataclasses datetime dbm decimal difflib dis doctest email enum errno
+  faulthandler fcntl filecmp fnmatch fractions ftplib functools gc getopt getpass gettext glob graphlib grp
+  gzip hashlib heapq hmac html http imaplib importlib inspect io ipaddress itertools json keyword linecache
+  locale logging lzma mailbox marshal math mimetypes mmap msvcrt multiprocessing netrc numbers operator
+  optparse os pathlib pdb pickle pkgutil platform plistlib poplib posixpath pprint profile pty pwd queue
+  random re readline reprlib resource runpy sched secrets select selectors shelve shlex shutil signal site
+  smtplib socket socketserver sqlite3 ssl stat statistics string struct subprocess symtable sys sysconfig
+  syslog tarfile tempfile termios textwrap threading time timeit tkinter token tokenize tomllib traceback
+  tty turtle types typing unicodedata unittest urllib uuid venv warnings wave weakref webbrowser winreg
+  winsound wsgiref xml xmlrpc zipfile zipimport zlib zoneinfo
+`.trim().split(/\s+/));
 
 /**
  * Best-effort: infer third-party pip packages a repo needs by scanning its
- * Python imports, so scripts with no requirements file (e.g. ML pipelines)
- * still get their dependencies. Excludes stdlib and the repo's own modules.
+ * Python imports (scripts and notebooks). Excludes stdlib and the repo's own
+ * modules.
  */
 function inferPipPackages(cwd) {
+  const files = collectSources(cwd, new Set(['.py', '.ipynb'])).slice(0, 150);
   const localNames = new Set();
-  try {
-    for (const f of readdirSync(cwd, { withFileTypes: true })) {
-      if (f.isDirectory()) localNames.add(f.name);
-      else if (f.name.endsWith('.py')) localNames.add(f.name.slice(0, -3));
-    }
-  } catch {
-    // ignore
+  for (const rel of files) {
+    for (const part of rel.split(/[\\/]/)) localNames.add(part.replace(/\.(py|ipynb)$/, ''));
   }
 
-  const files = collectSources(cwd, new Set(['.py'])).slice(0, 100);
   const mods = new Set();
   const re = /^\s*(?:from\s+([a-zA-Z_]\w*)|import\s+([a-zA-Z_]\w*))/gm;
   for (const rel of files) {
-    let content;
-    try {
-      content = readFileSync(join(cwd, rel), 'utf8');
-    } catch {
-      continue;
+    let content = readFileSafe(join(cwd, rel));
+    if (!content) continue;
+    if (rel.endsWith('.ipynb')) {
+      try {
+        content = JSON.parse(content).cells
+          .filter((c) => c.cell_type === 'code')
+          .map((c) => (Array.isArray(c.source) ? c.source.join('') : c.source))
+          .join('\n');
+      } catch {
+        continue;
+      }
     }
     let m;
     re.lastIndex = 0;
@@ -506,10 +648,411 @@ function inferPipPackages(cwd) {
       if (mod && !PY_STDLIB.has(mod) && !localNames.has(mod)) mods.add(mod);
     }
   }
+  return [...new Set([...mods].map((mod) => IMPORT_TO_PIP[mod] || mod))];
+}
 
-  const pkgs = new Set();
-  for (const mod of mods) pkgs.add(IMPORT_TO_PIP[mod] || mod);
-  return [...pkgs].filter(Boolean);
+// ── Go ──
+
+/** `.` if the root is package main, else the first cmd/<name> with a main. */
+function findGoMain(cwd) {
+  const isMainPkg = (dir) => {
+    try {
+      return readdirSync(dir).some((f) => f.endsWith('.go') && !f.endsWith('_test.go') && /^package main\b/m.test(readFileSafe(join(dir, f)) || ''));
+    } catch {
+      return false;
+    }
+  };
+  if (isMainPkg(cwd)) return '.';
+  for (const base of ['cmd', '.']) {
+    try {
+      for (const e of readdirSync(join(cwd, base), { withFileTypes: true })) {
+        if (e.isDirectory() && !e.name.startsWith('.') && isMainPkg(join(cwd, base, e.name))) return `./${base === '.' ? '' : 'cmd/'}${e.name}`;
+      }
+    } catch {
+      // no such folder
+    }
+  }
+  return '.';
+}
+
+// ── Ruby ──
+
+const RUBY_STDLIB = new Set(`
+  json net/http uri open-uri securerandom digest set date time yaml psych erb logger fileutils pp socket
+  openssl benchmark optparse ostruct pathname tempfile English io/console zlib stringio strscan shellwords
+  open3 timeout monitor forwardable singleton delegate observer tmpdir find etc rbconfig ripper coverage
+  objspace weakref cgi resolv ipaddr digest/md5 digest/sha1 digest/sha2 net/https
+`.trim().split(/\s+/));
+
+// Sinatra 4 ships without a web server; these make `ruby app.rb` serve.
+const SINATRA_SERVER_GEMS = ['rackup', 'webrick'];
+
+/** Gems a Gemfile-less repo needs: from an old-style .gems file or its requires. */
+function inferGems(cwd) {
+  const dotGems = readFileSafe(join(cwd, '.gems'));
+  if (dotGems) return dotGems.split(/\r?\n/).map((l) => l.trim().split(/\s+/)[0]).filter(Boolean);
+  const local = new Set(collectSources(cwd, new Set(['.rb'])).map((f) => f.replace(/\\/g, '/').replace(/\.rb$/, '')));
+  const gems = new Set();
+  for (const f of collectSources(cwd, new Set(['.rb']))) {
+    for (const m of (readFileSafe(join(cwd, f)) || '').matchAll(/^\s*require\s+['"]([^'"]+)['"]/gm)) {
+      const lib = m[1];
+      if (RUBY_STDLIB.has(lib) || local.has(lib) || lib.startsWith('.')) continue;
+      gems.add(lib.split('/')[0].replace(/^sinatra.*/, 'sinatra'));
+    }
+  }
+  if (gems.has('sinatra')) SINATRA_SERVER_GEMS.forEach((g) => gems.add(g));
+  return [...gems];
+}
+
+async function installRuby({ runtime, cwd, opts, onOutput }) {
+  const gemfile = join(cwd, 'Gemfile');
+  if (!existsSync(gemfile)) {
+    const gems = inferGems(cwd);
+    if (gems.length) {
+      onOutput(`\n[install] No Gemfile — installing required gems: ${gems.join(', ')}\n`);
+      await spawnWithOutput('gem', ['install', '--no-document', ...gems], opts, onOutput);
+    }
+    return {};
+  }
+  // A Gemfile pinning an exact Ruby (`ruby '3.1.2'`) refuses any other
+  // version; this clone is disposable, so relax the pin.
+  let text = readFileSafe(gemfile) || '';
+  if (/^\s*ruby\s+['"]/m.test(text)) {
+    text = text.replace(/^(\s*ruby\s+['"].*)$/m, '# $1  # relaxed by Repo Runner');
+  }
+  if (/gem\s+['"]sinatra['"]/.test(text) && !/gem\s+['"](puma|thin|webrick|falcon)['"]/.test(text)) {
+    text += `\n${SINATRA_SERVER_GEMS.map((g) => `gem '${g}'`).join('\n')}  # added by Repo Runner\n`;
+    rmSync(join(cwd, 'Gemfile.lock'), { force: true });
+  }
+  writeFileSync(gemfile, text);
+  await mustRun('bundle', ['install'], opts, onOutput, 'bundle install');
+  if (runtime.rails) {
+    onOutput('\n[setup] Preparing the Rails database...\n');
+    await spawnWithOutput('bundle', ['exec', 'rails', 'db:prepare'], opts, onOutput);
+  }
+  return {};
+}
+
+// ── PHP ──
+
+async function installPhp({ runtime, cwd, opts, onOutput }) {
+  if (existsSync(join(cwd, 'composer.json'))) {
+    await spawnWithOutput('composer', ['install', '--no-interaction', '--prefer-dist', '--ignore-platform-reqs'], opts, onOutput);
+  }
+  if (runtime.artisan) {
+    // Laravel needs an .env with an app key, and a database to migrate.
+    if (!existsSync(join(cwd, '.env')) && existsSync(join(cwd, '.env.example'))) {
+      copyFileSync(join(cwd, '.env.example'), join(cwd, '.env'));
+    }
+    const env = readFileSafe(join(cwd, '.env')) || '';
+    if (/^DB_CONNECTION=sqlite/m.test(env) || !/^DB_CONNECTION=/m.test(env)) {
+      const db = join(cwd, 'database', 'database.sqlite');
+      if (existsSync(join(cwd, 'database')) && !existsSync(db)) writeFileSync(db, '');
+    }
+    await spawnWithOutput('php', ['artisan', 'key:generate', '--force'], opts, onOutput);
+    await spawnWithOutput('php', ['artisan', 'migrate', '--force'], opts, onOutput);
+  }
+  return {};
+}
+
+// ── Java ──
+
+const JAVA_SKIP_DIRS = new Set(['test', 'tests', 'androidTest']);
+
+/** Fully-qualified name of the class with a main() method, preferring Main/App. */
+function findJavaMainClass(root) {
+  const files = collectSources(root, new Set(['.java'])).filter(
+    (f) => !f.split(/[\\/]/).some((part) => JAVA_SKIP_DIRS.has(part))
+  );
+  const mains = files.filter((f) => /static\s+void\s+main\s*\(/.test(readFileSafe(join(root, f)) || ''));
+  if (!mains.length) return null;
+  const preferred = mains.find((f) => /^(Main|App|Application)\.java$/.test(basename(f)))
+    || mains.find((f) => /Application\.java$/.test(f))
+    || mains[0];
+  const pkg = readFileSafe(join(root, preferred))?.match(/^\s*package\s+([\w.]+)\s*;/m)?.[1];
+  const cls = basename(preferred, '.java');
+  return pkg ? `${pkg}.${cls}` : cls;
+}
+
+/** Write a java @argfile (paths may contain spaces; argfiles need / or \\). */
+function writeJavaArgfile(cwd, classpath, mainClass) {
+  const cp = classpath.map((p) => p.replace(/\\/g, '/')).join(delimiter);
+  writeFileSync(join(cwd, '.rr-java-args'), `-cp "${cp}"\n${mainClass}\n`);
+  return { startCmd: 'java', startArgs: ['@.rr-java-args'] };
+}
+
+async function installMaven({ runtime, cwd, opts, onOutput }) {
+  const mvn = existsSync(join(cwd, IS_WIN ? 'mvnw.cmd' : 'mvnw')) ? local(IS_WIN ? 'mvnw.cmd' : 'mvnw') : 'mvn';
+  // Spring Boot / Quarkus run straight from their plugins (which compile too).
+  if (runtime.framework) return { mvn };
+
+  await mustRun(mvn, ['-B', '-DskipTests', 'package'], opts, onOutput, 'Maven build');
+  await spawnWithOutput(mvn, ['-B', '-q', 'dependency:build-classpath', '-Dmdep.outputFile=.rr-classpath.txt'], opts, onOutput);
+  const deps = (readFileSafe(join(cwd, '.rr-classpath.txt')) || '').trim().split(delimiter).filter(Boolean);
+  const mainClass = findJavaMainClass(join(cwd, 'src', 'main', 'java')) || findJavaMainClass(cwd);
+  if (!mainClass) throw new Error('Built the project, but found no class with a main() method to run.');
+  return { mvn, java: writeJavaArgfile(cwd, [join('target', 'classes'), ...deps], mainClass) };
+}
+
+async function installGradle({ runtime, cwd, opts, onOutput }) {
+  if (runtime.framework === 'android') {
+    throw new Error('This is an Android app — it needs an Android device or emulator, so it can\'t be previewed here.');
+  }
+  const wrapper = existsSync(join(cwd, IS_WIN ? 'gradlew.bat' : 'gradlew'));
+  const gradle = wrapper ? local(IS_WIN ? 'gradlew.bat' : 'gradlew') : 'gradle';
+  if (runtime.task) return { gradle };
+
+  await mustRun(gradle, ['build', '-x', 'test', '--console=plain'], opts, onOutput, 'Gradle build');
+  const mainClass = findJavaMainClass(join(cwd, 'src', 'main', 'java')) || findJavaMainClass(cwd);
+  if (!mainClass) throw new Error('Built the project, but found no class with a main() method to run.');
+  const classes = [join('build', 'classes', 'java', 'main'), join('build', 'resources', 'main')];
+  return { gradle, java: writeJavaArgfile(cwd, classes, mainClass) };
+}
+
+/** Plain .java files with no build tool: javac everything, run the main class. */
+async function compilePlainJava({ cwd, opts, onOutput }) {
+  const sources = collectSources(cwd, new Set(['.java'])).filter(
+    (f) => !f.split(/[\\/]/).some((part) => JAVA_SKIP_DIRS.has(part))
+  );
+  const mainClass = findJavaMainClass(cwd);
+  if (!mainClass) throw new Error('No Java class with a main() method was found.');
+  const libs = collectSources(cwd, new Set(['.jar']));
+  writeFileSync(join(cwd, '.rr-javac-sources'), sources.map((s) => `"${s.replace(/\\/g, '/')}"`).join('\n'));
+  const cpArgs = libs.length ? ['-cp', libs.join(delimiter)] : [];
+  onOutput(`\n[build] Compiling ${sources.length} Java file(s)...\n`);
+  await mustRun('javac', ['-encoding', 'UTF-8', '-d', '.rr-classes', ...cpArgs, '@.rr-javac-sources'], opts, onOutput, 'Java compilation');
+  return { java: writeJavaArgfile(cwd, ['.rr-classes', ...libs], mainClass) };
+}
+
+// ── .NET ──
+
+/** A global.json pinning an SDK that isn't installed makes every dotnet command fail. */
+function fixDotnetGlobalJson(cwd, onOutput) {
+  const gj = join(cwd, 'global.json');
+  if (!existsSync(gj)) return;
+  try {
+    execSync('dotnet --version', { cwd, stdio: 'ignore' });
+  } catch {
+    renameSync(gj, `${gj}.disabled`);
+    onOutput('\n[info] global.json pins a .NET SDK that isn\'t installed — using the installed SDK instead.\n');
+  }
+}
+
+// ── C / C++ ──
+
+const OUT_BIN = IS_WIN ? 'repo-runner-app.exe' : 'repo-runner-app';
+
+/** Newest executable under `dir` modified after `since` (build output). */
+function findNewestExecutable(dir, since) {
+  let best = null;
+  const walk = (d, depth) => {
+    let items;
+    try {
+      items = readdirSync(d, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const it of items) {
+      const p = join(d, it.name);
+      if (it.isDirectory()) {
+        if (depth < 4 && !['CMakeFiles', '.git', 'node_modules'].includes(it.name)) walk(p, depth + 1);
+        continue;
+      }
+      let st;
+      try {
+        st = statSync(p);
+      } catch {
+        continue;
+      }
+      const isExe = IS_WIN ? it.name.endsWith('.exe') : (st.mode & 0o111) && !extname(it.name);
+      if (isExe && st.mtimeMs >= since && (!best || st.mtimeMs > best.mtime)) best = { path: p, mtime: st.mtimeMs };
+    }
+  };
+  walk(dir, 0);
+  return best?.path || null;
+}
+
+/**
+ * Build a C/C++ project: CMake if it has a CMakeLists.txt, else its Makefile,
+ * else compile the sources directly. Returns the program to run.
+ */
+async function buildCpp({ cwd, opts, onOutput }) {
+  const started = Date.now() - 1000;
+  if (IS_WIN) opts.env.LDFLAGS = [opts.env.LDFLAGS, '-static'].filter(Boolean).join(' ');
+
+  const has = (cmd) => onPath(cmd, opts.env);
+  if (existsSync(join(cwd, 'CMakeLists.txt')) && has('cmake')) {
+    const gen = IS_WIN && has('mingw32-make') ? ['-G', 'MinGW Makefiles'] : [];
+    const configured = await spawnWithOutput('cmake', ['-S', '.', '-B', 'build-rr', ...gen, '-DCMAKE_BUILD_TYPE=Release'], opts, onOutput);
+    if (configured.code === 0 && (await spawnWithOutput('cmake', ['--build', 'build-rr', '-j', '4'], opts, onOutput)).code === 0) {
+      const program = findNewestExecutable(join(cwd, 'build-rr'), started);
+      if (program) return { program: relative(cwd, program) };
+    }
+    onOutput('\n[build] CMake build didn\'t produce a program — compiling the sources directly.\n');
+  } else if (existsSync(join(cwd, 'Makefile')) || existsSync(join(cwd, 'makefile'))) {
+    const make = has('make') ? 'make' : 'mingw32-make';
+    if ((await spawnWithOutput(make, [], opts, onOutput)).code === 0) {
+      const program = findNewestExecutable(cwd, started);
+      if (program) return { program: relative(cwd, program) };
+    }
+    onOutput('\n[build] make didn\'t produce a program — compiling the sources directly.\n');
+  }
+
+  const cppSources = collectSources(cwd, new Set(['.cpp', '.cc', '.cxx']));
+  const useC = cppSources.length === 0;
+  let sources = useC ? collectSources(cwd, new Set(['.c'])) : cppSources;
+  if (sources.length === 0) throw new Error('No C/C++ source files found to compile.');
+
+  // Repos of standalone exercises have many files each with its own main();
+  // link all the non-main files with just one of them.
+  const hasMain = (f) => /\b(int|void)\s+main\s*\(/.test(readFileSafe(join(cwd, f)) || '');
+  const mains = sources.filter(hasMain);
+  if (mains.length > 1) {
+    const chosen = mains.find((f) => /^main\.(c|cpp|cc|cxx)$/.test(basename(f))) || mains[0];
+    onOutput(`\n[build] ${mains.length} files define main() — building ${chosen}.\n`);
+    sources = [...sources.filter((f) => !mains.includes(f)), chosen];
+  }
+
+  const compiler = useC ? (has('gcc') ? 'gcc' : 'clang') : (has('g++') ? 'g++' : 'clang++');
+  const includes = ['.', 'include', 'src'].filter((d) => existsSync(join(cwd, d))).map((d) => `-I${d}`);
+  const code = sources.map((f) => readFileSafe(join(cwd, f)) || '').join('\n');
+  // Static on Windows: the program then doesn't need MinGW's DLLs at run time.
+  const libs = IS_WIN ? ['-static'] : [];
+  if (IS_WIN && /winsock2?\.h/i.test(code)) libs.push('-lws2_32');
+  if (!IS_WIN && useC) libs.push('-lm');
+  if (/<(thread|pthread\.h)>/.test(code)) libs.push('-pthread');
+
+  onOutput(`\n[build] Compiling ${sources.length} source file(s) with ${compiler}...\n`);
+  await mustRun(compiler, [...sources, ...includes, '-O2', useC ? '-std=c17' : '-std=c++20', '-o', OUT_BIN, ...libs], opts, onOutput, 'Compilation');
+  return { program: OUT_BIN };
+}
+
+// ─── Start commands ───
+
+/**
+ * Build the [command, args] to start a service on `hostPort`, using what
+ * installDeps prepared. Also sets port-related env vars each stack reads.
+ */
+function buildStartCommand({ runtime, hostPort, processEnv, cwd, prepared = {} }) {
+  const port = String(hostPort);
+  switch (runtime.id) {
+    case 'python-flask': {
+      processEnv.FLASK_RUN_PORT = port;
+      processEnv.FLASK_RUN_HOST = '0.0.0.0';
+      const appFile = runtime.start?.split(' ').pop() || 'app.py';
+      // An app with no app.run() / __main__ block exits immediately when run
+      // as a script — serve it through `flask run` instead.
+      const src = readFileSafe(join(cwd, appFile)) || '';
+      if (!/\.run\(|__main__/.test(src)) {
+        return { startCmd: VENV_PYTHON, startArgs: ['-m', 'flask', '--app', appFile.replace(/\.py$/, '').replace(/[\\/]/g, '.'), 'run', '--host', '0.0.0.0', '--port', port] };
+      }
+      return { startCmd: VENV_PYTHON, startArgs: [appFile] };
+    }
+    case 'python-fastapi': {
+      const modulePart = runtime.start?.match(/uvicorn\s+(\S+)/)?.[1] || 'main:app';
+      return { startCmd: venvBin('uvicorn'), startArgs: [modulePart, '--host', '0.0.0.0', '--port', port] };
+    }
+    case 'python-django':
+      return { startCmd: VENV_PYTHON, startArgs: [runtime.manage || 'manage.py', 'runserver', `0.0.0.0:${port}`] };
+    case 'python-streamlit': {
+      const appFile = runtime.start?.match(/streamlit\s+run\s+(\S+)/)?.[1] || 'app.py';
+      return { startCmd: venvBin('streamlit'), startArgs: ['run', appFile, '--server.port', port, '--server.headless', 'true', '--server.address', '0.0.0.0'] };
+    }
+    case 'python-gradio': {
+      processEnv.GRADIO_SERVER_PORT = port;
+      processEnv.GRADIO_SERVER_NAME = '0.0.0.0';
+      return { startCmd: VENV_PYTHON, startArgs: [runtime.start?.split(' ').pop() || 'app.py'] };
+    }
+    case 'python-notebook': {
+      // Config file (not CLI flags) so no quoting is needed for the iframe CSP.
+      writeFileSync(join(cwd, '.rr-jupyter-config.py'), [
+        "c.ServerApp.token = ''",
+        "c.ServerApp.password = ''",
+        "c.IdentityProvider.token = ''",
+        'c.ServerApp.open_browser = False',
+        "c.ServerApp.ip = '127.0.0.1'",
+        `c.ServerApp.port = ${port}`,
+        "c.ServerApp.allow_origin = '*'",
+        'c.ServerApp.disable_check_xsrf = True',
+        "c.ServerApp.tornado_settings = {'headers': {'Content-Security-Policy': 'frame-ancestors *'}}",
+      ].join('\n'));
+      return { startCmd: VENV_PYTHON, startArgs: ['-m', 'jupyter', 'lab', '--config=.rr-jupyter-config.py'] };
+    }
+    case 'python':
+      return { startCmd: VENV_PYTHON, startArgs: [runtime.start?.split(' ').pop() || 'main.py'] };
+
+    case 'node': {
+      processEnv.BROWSER = 'none'; // create-react-app would open a browser tab
+      const [first, ...rest] = (runtime.start || 'npm start').split(' ');
+      const cmd = ['npm', 'pnpm', 'yarn', 'bun'].includes(first) ? nodeManagerCommand(first) : [first];
+      return { startCmd: cmd[0], startArgs: [...cmd.slice(1), ...rest] };
+    }
+    case 'deno': {
+      const [cmd, ...args] = (runtime.start || 'deno run -A main.ts').split(' ');
+      return { startCmd: cmd, startArgs: args };
+    }
+    case 'go':
+      return { startCmd: 'go', startArgs: ['run', prepared.goTarget || '.'] };
+    case 'rust':
+      return { startCmd: 'cargo', startArgs: ['run', '--release'] };
+
+    case 'ruby': {
+      const bundled = existsSync(join(cwd, 'Gemfile'));
+      const exec = (args) => (bundled ? { startCmd: 'bundle', startArgs: ['exec', ...args] } : { startCmd: args[0], startArgs: args.slice(1) });
+      if (runtime.rails) return exec(['rails', 'server', '-b', '0.0.0.0', '-p', port]);
+      if (runtime.rackup) return exec(['rackup', '-o', '0.0.0.0', '-p', port]);
+      return exec(['ruby', runtime.entry || 'app.rb']); // Sinatra reads $PORT
+    }
+    case 'php':
+      if (runtime.artisan) return { startCmd: 'php', startArgs: ['artisan', 'serve', '--host=127.0.0.1', `--port=${port}`] };
+      return { startCmd: 'php', startArgs: ['-S', `0.0.0.0:${port}`, '-t', runtime.docroot || '.'] };
+
+    case 'java-maven':
+    case 'java-gradle':
+      processEnv.SERVER_PORT = port;        // Spring Boot
+      processEnv.QUARKUS_HTTP_PORT = port;  // Quarkus
+      processEnv.MICRONAUT_SERVER_PORT = port;
+      if (prepared.java) return prepared.java;
+      if (runtime.id === 'java-maven') {
+        const goal = runtime.framework === 'quarkus' ? 'quarkus:dev' : 'spring-boot:run';
+        return { startCmd: prepared.mvn || 'mvn', startArgs: ['-B', goal] };
+      }
+      return { startCmd: prepared.gradle || 'gradle', startArgs: [runtime.task || 'run', '--console=plain'] };
+    case 'java':
+      if (!prepared.java) throw new Error('The Java program failed to compile — see the errors above.');
+      return prepared.java;
+
+    case 'dotnet': {
+      processEnv.ASPNETCORE_URLS = `http://127.0.0.1:${port}`;
+      processEnv.DOTNET_ROLL_FORWARD = 'Major'; // run older targets on the installed runtime
+      processEnv.DOTNET_NOLOGO = '1';
+      processEnv.DOTNET_CLI_TELEMETRY_OPTOUT = '1';
+      const project = runtime.project ? ['--project', runtime.project] : [];
+      return { startCmd: 'dotnet', startArgs: ['run', ...project, '--urls', `http://127.0.0.1:${port}`] };
+    }
+
+    case 'cpp':
+      if (!prepared.program) throw new Error('The C/C++ program failed to build — see the errors above.');
+      return { startCmd: local(prepared.program), startArgs: [] };
+
+    default: {
+      if (runtime.start) {
+        const parts = runtime.start.split(' ');
+        return { startCmd: parts[0], startArgs: parts.slice(1) };
+      }
+      throw new Error(`No start command configured for ${runtime.label}`);
+    }
+  }
+}
+
+// ─── Helpers ───
+
+function readFileSafe(filePath) {
+  try {
+    return readFileSync(filePath, 'utf8');
+  } catch {
+    return null;
+  }
 }
 
 /** Write user-provided env vars to a .env file in `cwd` (if any). */
@@ -528,6 +1071,8 @@ const API_URL_ENV_KEYS = [
   'API_URL', 'API_BASE_URL', 'BACKEND_URL', 'PUBLIC_API_URL',
 ];
 
+const SOURCE_SKIP_DIRS = new Set(['.git', 'build', 'bin', 'obj', 'node_modules', '.vscode', 'cmake-build-debug', '.venv', 'venv', 'build-rr', 'target']);
+
 /** Recursively collect source files with the given extensions under `dir`. */
 function collectSources(dir, exts, base = dir, out = []) {
   let items;
@@ -542,200 +1087,220 @@ function collectSources(dir, exts, base = dir, out = []) {
       if (!SOURCE_SKIP_DIRS.has(it.name)) collectSources(p, exts, base, out);
     } else {
       const dot = it.name.lastIndexOf('.');
-      if (dot >= 0 && exts.has(it.name.slice(dot))) {
-        out.push(relative(base, p));
-      }
+      if (dot >= 0 && exts.has(it.name.slice(dot))) out.push(relative(base, p));
     }
   }
   return out;
 }
 
-const SOURCE_SKIP_DIRS = new Set(['.git', 'build', 'bin', 'obj', 'node_modules', '.vscode', 'cmake-build-debug']);
-
-/**
- * Compile and run a C/C++ console program, streaming its output to the
- * terminal. Console programs have no web server, so there's no preview port —
- * `hostPort` is null and the UI shows the terminal output only.
- */
-async function startConsoleApp({ sessionId, repoDir, runtime, cwd, envVars, runtimes, onOutput }) {
-  const processEnv = { ...process.env, ...(envVars || {}) };
-  const isWin = process.platform === 'win32';
-
-  if (runtime.id === 'cpp') {
-    const compiler = runtimes.cppCompiler;
-    if (!compiler) {
-      throw new Error('No C/C++ compiler found. Install g++ (MinGW-w64 on Windows) or use Docker.');
-    }
-    const cppSources = collectSources(cwd, new Set(['.cpp', '.cc', '.cxx']));
-    const cSources = cppSources.length === 0 ? collectSources(cwd, new Set(['.c'])) : [];
-    const sources = cppSources.length ? cppSources : cSources;
-    if (sources.length === 0) throw new Error('No C/C++ source files found to compile.');
-
-    const outBin = isWin ? 'repo-runner-app.exe' : 'repo-runner-app';
-    const useC = cppSources.length === 0;
-    const cc = useC ? (isCommandAvailable('gcc') ? 'gcc' : compiler) : compiler;
-    const std = useC ? '-std=c11' : '-std=c++17';
-
-    onOutput(`\n[build] Compiling ${sources.length} source file(s) with ${cc}...\n`);
-    const compile = await spawnWithOutput(cc, [...sources, '-O2', std, '-o', outBin], { cwd, env: processEnv }, onOutput);
-    if (compile.code !== 0) {
-      throw new Error(`Compilation failed (exit code ${compile.code}). See the errors above.`);
-    }
-    onOutput(`\n[ready] Compiled successfully. Running the program:\n`);
-    onOutput(`\x1b[2m(this is a console program — output appears here; it has no web preview)\x1b[0m\n\n`);
-
-    const runPath = isWin ? outBin : `./${outBin}`;
-    const proc = spawnApp({ startCmd: runPath, startArgs: [], cwd, processEnv, onOutput });
-
-    const cleanupTimer = setTimeout(() => {
-      stopNativeProcess(sessionId, (msg) => console.log(`[auto-cleanup] ${msg}`));
-    }, SESSION_TIMEOUT_MS);
-
-    nativeSessions.set(sessionId, {
-      processes: [proc], hostPort: null, ports: [], runtime, repoDir, cleanupTimer, mode: 'native-console',
-    });
-
-    proc.on('exit', (code) => onOutput(`\n\x1b[2m[process exited with code ${code}]\x1b[0m\n`));
-    return { hostPort: null, console: true };
-  }
-
-  throw new Error(`Console runtime ${runtime.label} is not supported yet.`);
-}
-
-/**
- * Serve a plain static website (HTML/CSS/JS, no build step) over HTTP using
- * Python's built-in server. If the landing page isn't index.html (e.g.
- * home.html), copy it to index.html so it loads at "/".
- */
-async function startStaticSite({ sessionId, repoDir, runtime, cwd, runtimes, onOutput }) {
-  const hostPort = getAvailablePort();
-
-  // Ensure Python is available (auto-provision on Windows if needed).
-  if (!runtimes.python) {
-    await provisionPython(onOutput);
-    clearRuntimeCache();
-    Object.assign(runtimes, checkNativeRuntimes());
-  }
-  const python = runtimes.pythonCmd || 'python';
-
-  const entry = runtime.entry || 'index.html';
-  if (entry !== 'index.html' && !existsSync(join(cwd, 'index.html'))) {
-    try {
-      copyFileSync(join(cwd, entry), join(cwd, 'index.html'));
-      onOutput(`\n[info] Using ${entry} as the home page (served at /).\n`);
-    } catch {
-      // If the copy fails, the site is still reachable at /<entry>.
-    }
-  }
-
-  onOutput(`\n[serve] Serving static site on port ${hostPort}...\n`);
-  const proc = spawnApp({
-    startCmd: python,
-    startArgs: ['-m', 'http.server', String(hostPort), '--bind', '0.0.0.0'],
-    cwd,
-    processEnv: { ...process.env, PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8' },
-    onOutput,
-  });
-
-  const cleanupTimer = setTimeout(() => {
-    stopNativeProcess(sessionId, (msg) => console.log(`[auto-cleanup] ${msg}`));
-  }, SESSION_TIMEOUT_MS);
-
-  const session = {
-    processes: [proc], hostPort, ports: [hostPort], runtime, repoDir, cleanupTimer, mode: 'native-static',
-  };
-  nativeSessions.set(sessionId, session);
-
-  try {
-    await waitForPort(hostPort, 30000);
-    onOutput(`\n[ready] Static site is live on port ${hostPort}!\n`);
-  } catch {
-    onOutput(`\n[warning] Port ${hostPort} not detected — the server may still be starting.\n`);
-  }
-  return { hostPort };
-}
-
-/**
- * Start a native process for a repo (no Docker needed).
- */
-export async function startNativeProcess({ sessionId, repoDir, runtime, envVars, onOutput }) {
-  const runtimes = checkNativeRuntimes();
-
-  // The runnable app may live in a subfolder (monorepo) — run everything there.
-  const cwd = runtime.workdir ? join(repoDir, runtime.workdir) : repoDir;
-  if (runtime.workdir) {
-    onOutput(`\n[info] Project detected in ./${runtime.workdir} — running there.\n`);
-  }
-
-  // Console programs (C/C++) have no web server — compile & run to the terminal.
-  if (runtime.console) {
-    return startConsoleApp({ sessionId, repoDir, runtime, cwd, envVars, runtimes, onOutput });
-  }
-
-  // Plain static website — serve the files over HTTP.
-  if (runtime.static) {
-    return startStaticSite({ sessionId, repoDir, runtime, cwd, runtimes, onOutput });
-  }
-
-  const hostPort = getAvailablePort();
-
-  // Write .env file if needed
-  writeEnvFile(cwd, envVars, onOutput);
-
-  // Build environment variables for the process
-  const processEnv = {
+function baseProcessEnv(envVars) {
+  return {
     ...process.env,
     // Force UTF-8 so Python apps that print emoji/Unicode don't crash on
     // Windows' legacy cp1252 console encoding.
     PYTHONUTF8: '1',
     PYTHONIOENCODING: 'utf-8',
+    COREPACK_ENABLE_DOWNLOAD_PROMPT: '0',
+    UV_LINK_MODE: 'copy', // uv's cache and the repos may sit on different drives
     ...(envVars || {}),
-    PORT: String(hostPort),
   };
+}
 
-  // ─── Install dependencies ───
-  onOutput(`\n[install] Installing dependencies...\n`);
-  try {
-    await installDeps({ runtime, cwd, processEnv, runtimes, onOutput });
-  } catch (err) {
-    onOutput(`\n[warning] Install warning: ${err.message}\n`);
-    // Continue anyway — some projects work without full install
+// ─── Static sites / file browser ───
+
+const MIME = {
+  '.html': 'text/html; charset=utf-8', '.htm': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8',
+  '.js': 'text/javascript; charset=utf-8', '.mjs': 'text/javascript; charset=utf-8', '.json': 'application/json',
+  '.svg': 'image/svg+xml', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif',
+  '.webp': 'image/webp', '.ico': 'image/x-icon', '.woff': 'font/woff', '.woff2': 'font/woff2', '.ttf': 'font/ttf',
+  '.mp4': 'video/mp4', '.webm': 'video/webm', '.mp3': 'audio/mpeg', '.wav': 'audio/wav', '.pdf': 'application/pdf',
+  '.txt': 'text/plain; charset=utf-8', '.md': 'text/plain; charset=utf-8', '.wasm': 'application/wasm',
+  '.xml': 'application/xml',
+};
+
+const escapeHtml = (s) => s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+function directoryListing(dir, urlPath) {
+  const entries = readdirSync(dir, { withFileTypes: true })
+    .filter((e) => e.name !== '.git')
+    .sort((a, b) => (b.isDirectory() - a.isDirectory()) || a.name.localeCompare(b.name));
+  const base = urlPath.endsWith('/') ? urlPath : `${urlPath}/`;
+  const rows = entries.map((e) => {
+    const name = escapeHtml(e.name) + (e.isDirectory() ? '/' : '');
+    return `<li><a href="${base}${encodeURIComponent(e.name)}${e.isDirectory() ? '/' : ''}">${e.isDirectory() ? '📁' : '📄'} ${name}</a></li>`;
+  }).join('');
+  const readme = entries.find((e) => /^readme(\.md|\.txt)?$/i.test(e.name));
+  const readmeText = readme ? readFileSafe(join(dir, readme.name)) : null;
+  return `<!doctype html><meta charset="utf-8"><title>${escapeHtml(urlPath)}</title>
+<style>body{font:14px/1.5 system-ui,sans-serif;margin:0;padding:24px;background:#0d1117;color:#e6edf3}
+a{color:#58a6ff;text-decoration:none}a:hover{text-decoration:underline}ul{list-style:none;padding:0;margin:0 0 24px;
+border:1px solid #30363d;border-radius:8px;overflow:hidden}li{padding:8px 14px;border-top:1px solid #21262d}li:first-child{border-top:0}
+h1{font-size:16px;font-weight:600}pre{white-space:pre-wrap;background:#161b22;border:1px solid #30363d;border-radius:8px;padding:16px}</style>
+<h1>${escapeHtml(urlPath)}</h1><ul>${urlPath !== '/' ? '<li><a href="../">⬆ ..</a></li>' : ''}${rows}</ul>
+${readmeText ? `<pre>${escapeHtml(readmeText.slice(0, 20000))}</pre>` : ''}`;
+}
+
+/** A tiny static file server (index.html, or a directory listing). */
+function createStaticServer(root) {
+  const rootAbs = resolve(root);
+  return createServer((req, res) => {
+    let urlPath;
+    try {
+      urlPath = decodeURIComponent(new URL(req.url, 'http://x').pathname);
+    } catch {
+      res.writeHead(400).end();
+      return;
+    }
+    const target = resolve(rootAbs, `.${urlPath}`);
+    if (target !== rootAbs && !target.startsWith(rootAbs + sep)) {
+      res.writeHead(403).end();
+      return;
+    }
+    let st;
+    try {
+      st = statSync(target);
+    } catch {
+      res.writeHead(404, { 'Content-Type': 'text/plain' }).end('Not found');
+      return;
+    }
+    if (st.isDirectory()) {
+      if (!urlPath.endsWith('/')) {
+        res.writeHead(301, { Location: `${urlPath}/` }).end();
+        return;
+      }
+      const index = join(target, 'index.html');
+      if (existsSync(index)) {
+        res.writeHead(200, { 'Content-Type': MIME['.html'] });
+        createReadStream(index).pipe(res);
+      } else {
+        res.writeHead(200, { 'Content-Type': MIME['.html'] }).end(directoryListing(target, urlPath));
+      }
+      return;
+    }
+    res.writeHead(200, { 'Content-Type': MIME[extname(target).toLowerCase()] || 'application/octet-stream' });
+    createReadStream(target).pipe(res);
+  });
+}
+
+async function startStaticSite({ sessionId, repoDir, runtime, cwd, onOutput }) {
+  const hostPort = getAvailablePort();
+
+  const entry = runtime.entry || 'index.html';
+  if (entry !== 'index.html' && !existsSync(join(cwd, 'index.html')) && existsSync(join(cwd, entry))) {
+    copyFileSync(join(cwd, entry), join(cwd, 'index.html'));
+    onOutput(`\n[info] Using ${entry} as the home page (served at /).\n`);
+  }
+  if (runtime.browse) {
+    onOutput('\n[info] No runnable app detected — showing the repository files instead.\n');
   }
 
-  // ─── Start the app ───
-  onOutput(`\n[start] Starting app on port ${hostPort}...\n`);
-  const { startCmd, startArgs } = buildStartCommand({ runtime, hostPort, processEnv });
-  const observer = createPortObserver();
-  const appProcess = spawnApp({
-    startCmd, startArgs, cwd, processEnv,
-    onOutput: (t) => { observer.scan(t); onOutput(t); },
-  });
+  const server = createStaticServer(cwd);
+  await new Promise((res, rej) => server.once('error', rej).listen(hostPort, '127.0.0.1', res));
+  onOutput(`\n[serve] Serving ${runtime.browse ? 'files' : 'static site'} on port ${hostPort}...\n`);
 
-  // Set auto-cleanup timer
   const cleanupTimer = setTimeout(() => {
     stopNativeProcess(sessionId, (msg) => console.log(`[auto-cleanup] ${msg}`));
   }, SESSION_TIMEOUT_MS);
 
-  const session = {
-    processes: [appProcess],
-    hostPort,
-    ports: [hostPort], // allocated port(s) to release on stop
-    runtime,
-    repoDir,
-    cleanupTimer,
-    mode: 'native',
-  };
-  nativeSessions.set(sessionId, session);
+  nativeSessions.set(sessionId, {
+    processes: [], servers: [server], hostPort, ports: [hostPort], runtime, repoDir, cleanupTimer, mode: 'native-static',
+  });
+  onOutput(`\n[ready] Live on port ${hostPort}!\n`);
+  return { hostPort };
+}
 
-  // Detect when (and on which port) the server actually comes up.
-  const readyPort = await waitForServer({ hostPort, observedPorts: observer.ports, timeoutMs: 60000, onOutput });
-  if (readyPort) {
-    session.hostPort = readyPort;
-    onOutput(`\n[ready] App is live on port ${readyPort}!\n`);
-    return { hostPort: readyPort };
+// ─── Entry points ───
+
+/**
+ * Start a native process for a repo (no Docker needed). `onReady(port)` is
+ * called if the app's web server only comes up after this returns.
+ *
+ * Returns { hostPort } when a web server is up; { hostPort: null } for a
+ * console program (finished or still running); { hostPort: null, failed }
+ * when it crashed.
+ */
+export async function startNativeProcess({ sessionId, repoDir, runtime, envVars, onOutput, onReady }) {
+  const cwd = runtime.workdir ? join(repoDir, runtime.workdir) : repoDir;
+  if (runtime.workdir) {
+    onOutput(`\n[info] Project detected in ./${runtime.workdir} — running there.\n`);
   }
-  onOutput(`\n[warning] No open port detected — the app may have failed to start (check the logs above).\n`);
-  return { hostPort: null, failed: true };
+
+  if (runtime.static) {
+    return startStaticSite({ sessionId, repoDir, runtime, cwd, onOutput });
+  }
+
+  const hostPort = getAvailablePort();
+  try {
+    writeEnvFile(cwd, envVars, onOutput);
+    const processEnv = { ...baseProcessEnv(envVars), PORT: String(hostPort) };
+
+    await prepareToolchain({ runtime, cwd, processEnv, onOutput });
+
+    onOutput(`\n[install] Installing dependencies...\n`);
+    let prepared = {};
+    try {
+      prepared = (await installDeps({ runtime, cwd, processEnv, onOutput })) || {};
+    } catch (err) {
+      onOutput(`\n[warning] ${err.message}\n`);
+      // Interpreted stacks may still start; compiled ones fail in buildStartCommand.
+    }
+
+    onOutput(`\n[start] Starting app on port ${hostPort}...\n`);
+    const { startCmd, startArgs } = buildStartCommand({ runtime, hostPort, processEnv, cwd, prepared });
+    const observer = createPortObserver();
+    let policyBlocked = false;
+    const appProcess = spawnApp({
+      startCmd, startArgs, cwd, processEnv,
+      onOutput: (t) => {
+        observer.scan(t);
+        if (/Application Control policy has blocked/i.test(t)) policyBlocked = true;
+        onOutput(t);
+      },
+    });
+    const exitInfo = { code: undefined };
+    appProcess.on('exit', (code) => { exitInfo.code = code ?? 1; });
+    appProcess.on('error', () => { exitInfo.code = 1; });
+
+    const cleanupTimer = setTimeout(() => {
+      stopNativeProcess(sessionId, (msg) => console.log(`[auto-cleanup] ${msg}`));
+    }, SESSION_TIMEOUT_MS);
+
+    const session = {
+      processes: [appProcess], hostPort, ports: [hostPort], runtime, repoDir, cleanupTimer, mode: 'native',
+    };
+    nativeSessions.set(sessionId, session);
+
+    // Compiled console programs and plain scripts rarely serve HTTP, so hand
+    // over to the terminal quickly; the late-port watcher still catches servers.
+    const timeoutMs = ['cpp', 'java'].includes(runtime.id) ? 8000
+      : runtime.id === 'python' ? 20000
+      : runtime.id.startsWith('java') || runtime.id === 'dotnet' ? 180000
+      : 90000;
+    const readyPort = await waitForServer({ hostPort, observedPorts: observer.ports, timeoutMs, onOutput, exitInfo });
+    if (readyPort) {
+      session.hostPort = readyPort;
+      onOutput(`\n[ready] App is live on port ${readyPort}!\n`);
+      return { hostPort: readyPort };
+    }
+    if (exitInfo.code === 0) {
+      onOutput('\n[done] The program ran and finished — it has no web server, so its output above is the result.\n');
+      return { hostPort: null, finished: true };
+    }
+    if (exitInfo.code !== undefined) {
+      if (policyBlocked || exitInfo.code === 3236495362) {
+        onOutput('\n[error] Windows blocked a program this project built (Smart App Control / Application Control policy). ' +
+          'That is a security setting on this PC; the same repo runs on machines without it or on the Linux backend.\n');
+      }
+      onOutput(`\n[error] The app exited with code ${exitInfo.code} before opening a web server (see the logs above).\n`);
+      return { hostPort: null, failed: true };
+    }
+    onOutput('\n[info] Still running, no web server detected yet — showing console output. The preview opens automatically if it starts listening.\n');
+    watchForLatePort({ sessionId, session, hostPort, observer, exitInfo, onOutput, onReady });
+    return { hostPort: null };
+  } catch (err) {
+    if (!nativeSessions.has(sessionId)) releasePort(hostPort);
+    throw err;
+  }
 }
 
 /**
@@ -744,14 +1309,7 @@ export async function startNativeProcess({ sessionId, repoDir, runtime, envVars,
  * common API-URL env vars. Returns the frontend's port as the preview URL.
  */
 export async function startCompoundNative({ sessionId, repoDir, services, envVars, onOutput }) {
-  const runtimes = checkNativeRuntimes();
-  const baseEnv = {
-    ...process.env,
-    // Force UTF-8 for Python apps (see startNativeProcess for why).
-    PYTHONUTF8: '1',
-    PYTHONIOENCODING: 'utf-8',
-    ...(envVars || {}),
-  };
+  const baseEnv = baseProcessEnv(envVars);
   const processes = [];
   const ports = [];
 
@@ -767,13 +1325,15 @@ export async function startCompoundNative({ sessionId, repoDir, services, envVar
     onOutput(`\n[info] Backend: ${backend.runtime.label} in ./${backend.workdir || '.'} → port ${backendPort}\n`);
     const bEnv = { ...baseEnv, PORT: String(backendPort) };
     writeEnvFile(cwd, envVars, onOutput);
+    await prepareToolchain({ runtime: backend.runtime, cwd, processEnv: bEnv, onOutput });
     onOutput(`\n[install] Installing backend dependencies...\n`);
+    let prepared = {};
     try {
-      await installDeps({ runtime: backend.runtime, cwd, processEnv: bEnv, runtimes, onOutput });
+      prepared = (await installDeps({ runtime: backend.runtime, cwd, processEnv: bEnv, onOutput })) || {};
     } catch (err) {
       onOutput(`\n[warning] Backend install warning: ${err.message}\n`);
     }
-    const { startCmd, startArgs } = buildStartCommand({ runtime: backend.runtime, hostPort: backendPort, processEnv: bEnv });
+    const { startCmd, startArgs } = buildStartCommand({ runtime: backend.runtime, hostPort: backendPort, processEnv: bEnv, cwd, prepared });
     onOutput(`\n[start] Starting backend...\n`);
     processes.push(spawnApp({ startCmd, startArgs, cwd, processEnv: bEnv, onOutput }));
     try {
@@ -795,14 +1355,31 @@ export async function startCompoundNative({ sessionId, repoDir, services, envVar
     onOutput(`\n[info] Wiring frontend → backend at ${apiUrl}\n`);
   }
   onOutput(`\n[info] Frontend: ${frontend.runtime.label} in ./${frontend.workdir || '.'} → port ${frontPort}\n`);
+
+  // Plain-HTML frontend: serve its files; the page talks to the backend itself.
+  if (frontend.runtime.static) {
+    const server = createStaticServer(fcwd);
+    await new Promise((res, rej) => server.once('error', rej).listen(frontPort, '127.0.0.1', res));
+    const cleanupTimer = setTimeout(() => {
+      stopNativeProcess(sessionId, (msg) => console.log(`[auto-cleanup] ${msg}`));
+    }, SESSION_TIMEOUT_MS);
+    nativeSessions.set(sessionId, {
+      processes, servers: [server], hostPort: frontPort, ports, runtime: frontend.runtime, repoDir, cleanupTimer, mode: 'native-compound',
+    });
+    onOutput(`\n✅ App is live on port ${frontPort}!\n`);
+    return { hostPort: frontPort };
+  }
+
   writeEnvFile(fcwd, envVars, onOutput);
+  await prepareToolchain({ runtime: frontend.runtime, cwd: fcwd, processEnv: fEnv, onOutput });
   onOutput(`\n[install] Installing frontend dependencies...\n`);
+  let fPrepared = {};
   try {
-    await installDeps({ runtime: frontend.runtime, cwd: fcwd, processEnv: fEnv, runtimes, onOutput });
+    fPrepared = (await installDeps({ runtime: frontend.runtime, cwd: fcwd, processEnv: fEnv, onOutput })) || {};
   } catch (err) {
     onOutput(`\n[warning] Frontend install warning: ${err.message}\n`);
   }
-  const { startCmd, startArgs } = buildStartCommand({ runtime: frontend.runtime, hostPort: frontPort, processEnv: fEnv });
+  const { startCmd, startArgs } = buildStartCommand({ runtime: frontend.runtime, hostPort: frontPort, processEnv: fEnv, cwd: fcwd, prepared: fPrepared });
   onOutput(`\n[start] Starting frontend...\n`);
   const observer = createPortObserver();
   processes.push(spawnApp({
@@ -847,11 +1424,9 @@ export async function stopNativeProcess(sessionId, onOutput) {
 
   clearTimeout(session.cleanupTimer);
 
-  // A session may run one or several processes (compound apps).
-  const procs = session.processes || (session.process ? [session.process] : []);
-  for (const proc of procs) {
+  for (const proc of session.processes || []) {
     try {
-      if (process.platform === 'win32') {
+      if (IS_WIN) {
         // On Windows, use taskkill to kill the process tree
         try {
           execSync(`taskkill /pid ${proc.pid} /T /F`, { stdio: 'ignore' });
@@ -868,6 +1443,10 @@ export async function stopNativeProcess(sessionId, onOutput) {
       // already stopped
     }
   }
+  for (const server of session.servers || []) {
+    server.closeAllConnections?.();
+    server.close();
+  }
   onOutput?.('Process(es) stopped.\n');
 
   for (const port of session.ports || [session.hostPort]) {
@@ -875,6 +1454,17 @@ export async function stopNativeProcess(sessionId, onOutput) {
   }
   nativeSessions.delete(sessionId);
   onOutput?.('Session cleaned up.\n');
+}
+
+/** Send terminal input to a session's app process (the last one started). */
+export function writeToSession(sessionId, data) {
+  const proc = nativeSessions.get(sessionId)?.processes?.at(-1);
+  if (proc?.stdin?.writable) proc.stdin.write(data);
+}
+
+/** Ids of sessions currently serving a web preview. */
+export function listPreviewSessions() {
+  return [...nativeSessions.entries()].filter(([, s]) => s.hostPort).map(([id]) => id);
 }
 
 /**
