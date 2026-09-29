@@ -10,7 +10,7 @@ import simpleGit from 'simple-git';
 import { v4 as uuid } from 'uuid';
 import { join } from 'path';
 import { mkdirSync, rmSync, existsSync, readdirSync, statSync } from 'fs';
-import { detectRuntime, detectEnvVars, detectEnvVarsFromCode, detectServices, isPromptableSecret, envKeysWithDefaults } from './detector.js';
+import { detectRuntime, detectEnvVars, detectEnvVarsFromCode, detectServices, isPromptableSecret, envKeysWithDefaults, detectOrchestratedScript } from './detector.js';
 import { startSandbox, stopSandbox, getSession, cleanupAll } from './sandbox.js';
 import {
   checkNativeRuntimes,
@@ -326,9 +326,13 @@ app.post('/api/run-native', async (req, res) => {
 
   let runtime = detectRuntime(repoDir);
 
-  // Monorepo? If there's both a natively-runnable frontend and backend, run
-  // both and wire them together into a single live demo.
-  const services = detectServices(repoDir).filter((s) => canRunNatively(s.runtime.id));
+  // A root script that already starts every service (concurrently "vite"
+  // "uvicorn …") is run as-is — the frontend expects the backend exactly where
+  // that script puts it. Otherwise, with both a frontend and a backend, run
+  // both and wire them together.
+  const orchestrated = runtime.id === 'node' && !runtime.workdir ? detectOrchestratedScript(repoDir) : null;
+  if (orchestrated) runtime = { ...runtime, start: `${runtime.manager || 'npm'} run ${orchestrated.script}`, orchestrated };
+  const services = orchestrated ? [] : detectServices(repoDir).filter((s) => canRunNatively(s.runtime.id));
   const hasFrontend = services.some((s) => s.role === 'frontend');
   const hasBackend = services.some((s) => s.role === 'backend');
   const isCompound = services.length >= 2 && hasFrontend && hasBackend;
@@ -350,7 +354,9 @@ app.post('/api/run-native', async (req, res) => {
     stage: 'building',
     message: isCompound
       ? `Setting up ${services.length} services (frontend + backend)...`
-      : `Setting up ${runtime.label} natively...`,
+      : orchestrated
+        ? `Running the repo's own "${orchestrated.script}" script (it starts every service)...`
+        : `Setting up ${runtime.label} natively...`,
   });
 
   try {

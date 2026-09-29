@@ -4,7 +4,7 @@
 
 import { spawn, execSync } from 'child_process';
 import { createServer } from 'http';
-import { join, relative, delimiter, basename, extname, resolve, sep } from 'path';
+import { join, relative, delimiter, basename, extname, resolve, sep, dirname } from 'path';
 import {
   writeFileSync, existsSync, copyFileSync, readdirSync, readFileSync, statSync, renameSync, createReadStream, rmSync,
 } from 'fs';
@@ -275,22 +275,43 @@ const COMMON_APP_PORTS = [4000, 3000, 5000, 8000, 8080, 8501, 8888, 9000, 4200, 
  * "listening on port 4000"). Only local URLs count, so a printed DB/API URL
  * the app *connects to* isn't mistaken for its own port.
  */
-function createPortObserver() {
-  const ports = new Set();
+function createPortObserver({ avoid = [] } = {}) {
+  // Dev servers announce the page to open on a "Local:" line (Vite, Next,
+  // Angular, CRA) — prefer those over API servers that start alongside.
+  const preferred = new Set();
+  const others = new Set();
+  const avoidSet = new Set(avoid);
+  const started = Date.now();
   const patterns = [
     /https?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1?\]):(\d{2,5})/gi,
     /listening on\s+(?:port\s*)?:?\s*(\d{2,5})/gi,
     /(?:server|app|running).{0,20}?\bport\s*[:=]?\s*(\d{2,5})/gi,
   ];
   const scan = (text) => {
-    for (const re of patterns) {
-      re.lastIndex = 0;
-      let m;
-      while ((m = re.exec(text))) {
-        const p = Number(m[1]);
-        if (p > 0 && p < 65536 && !RESERVED_PORTS.has(p)) ports.add(p);
+    // Strip colors first: Vite prints the port in bold (localhost:\x1b[1m3000\x1b[22m).
+    // eslint-disable-next-line no-control-regex
+    const plain = text.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '');
+    for (const line of plain.split(/\r?\n/)) {
+      const target = /\bLocal:|➜|ready - started server|On Your Network/i.test(line) ? preferred : others;
+      for (const re of patterns) {
+        re.lastIndex = 0;
+        let m;
+        while ((m = re.exec(line))) {
+          const p = Number(m[1]);
+          if (p > 0 && p < 65536 && !RESERVED_PORTS.has(p)) target.add(p);
+        }
       }
     }
+  };
+  // Known backend ports (from an orchestrating script) are only used if
+  // nothing else turns up for a while.
+  const ports = {
+    *[Symbol.iterator]() {
+      yield* preferred;
+      for (const p of others) {
+        if (!preferred.has(p) && (!avoidSet.has(p) || Date.now() - started > 45000)) yield p;
+      }
+    },
   };
   return { ports, scan };
 }
@@ -415,6 +436,7 @@ async function installDeps({ runtime, cwd, processEnv, onOutput }) {
         onOutput('\n[install] Retrying with --legacy-peer-deps...\n');
         await spawnWithOutput('npm', ['install', '--legacy-peer-deps'], opts, onOutput);
       }
+      if (runtime.orchestrated?.pythonDirs?.length) await prepareOrchestratedPython({ runtime, cwd, processEnv, onOutput });
       return {};
     }
 
@@ -466,6 +488,25 @@ function nodeManagerCommand(manager) {
   if (manager === 'npm' || manager === 'bun' || isCommandAvailable(manager)) return [manager];
   if (isCommandAvailable('corepack')) return ['corepack', manager];
   return ['npx', '--yes', manager === 'yarn' ? 'yarn@1' : manager];
+}
+
+/**
+ * The repo's own dev script also starts Python services (e.g. `python -m
+ * uvicorn agents.main:app`): install their dependencies and put that Python
+ * first on PATH, so the script's `python` finds them.
+ */
+async function prepareOrchestratedPython({ runtime, cwd, processEnv, onOutput }) {
+  if (!isCommandAvailable('uv')) applyToolEnv(processEnv, await ensureTool('uv', onOutput));
+  const script = runtime.orchestrated.script;
+  const text = JSON.parse(readFileSafe(join(cwd, 'package.json')) || '{}').scripts?.[script] || '';
+  // Servers the script calls must be installed even if requirements.txt omits them.
+  const pyRuntime = { id: /uvicorn/.test(text) ? 'python-fastapi' : 'python' };
+  let python = null;
+  for (const dir of runtime.orchestrated.pythonDirs) {
+    onOutput(`\n[install] Python dependencies for ./${dir || '.'} (used by "npm run ${script}")...\n`);
+    ({ python } = await installPython({ runtime: pyRuntime, cwd: join(cwd, dir), processEnv, onOutput }));
+  }
+  if (python) applyToolEnv(processEnv, { pathDirs: [dirname(python)], vars: {} });
 }
 
 // ── Python (via uv) ──
@@ -532,7 +573,9 @@ async function installPython({ runtime, cwd, processEnv, onOutput }) {
 
   const site = join(cwd, PY_SITE);
   const pathKey = Object.keys(processEnv).find((k) => k.toUpperCase() === 'PYTHONPATH') || 'PYTHONPATH';
-  processEnv[pathKey] = [cwd, site, processEnv[pathKey]].filter(Boolean).join(delimiter);
+  // src/ layouts import their packages by name from there.
+  const srcDir = existsSync(join(cwd, 'src')) && !existsSync(join(cwd, 'src', '__init__.py')) ? join(cwd, 'src') : null;
+  processEnv[pathKey] = [cwd, srcDir, site, processEnv[pathKey]].filter(Boolean).join(delimiter);
   processEnv.PYTHONNOUSERSITE = '1';
 
   const pip = async (args) => (await spawnWithOutput('uv', ['pip', 'install', '--python', python, '--target', PY_SITE, ...args], opts, onOutput)).code === 0;
@@ -1025,6 +1068,28 @@ async function buildCpp({ cwd, opts, onOutput }) {
 // ─── Start commands ───
 
 /**
+ * How to import a Python file. A file that uses relative imports
+ * (`from . import x`) only works as part of its package, so it's imported as
+ * `pkg.module` from the folder above the package — e.g. agents/main.py becomes
+ * `agents.main`, run from the repo root. Returns { module, runCwd, inPackage }.
+ */
+function pythonImportTarget(cwd, relFile) {
+  const stem = basename(relFile).replace(/\.py$/, '');
+  const src = readFileSafe(join(cwd, relFile)) || '';
+  if (!/^\s*from\s+\.+[\w.]*\s+import\s/m.test(src)) {
+    return { module: relFile.replace(/\.py$/, '').replace(/[\\/]/g, '.'), runCwd: cwd, inPackage: false };
+  }
+  // The package reaches up through every folder that has an __init__.py.
+  let top = dirname(join(cwd, relFile));
+  const names = [basename(top)];
+  while (existsSync(join(dirname(top), '__init__.py')) && dirname(top) !== top) {
+    top = dirname(top);
+    names.unshift(basename(top));
+  }
+  return { module: [...names, stem].join('.'), runCwd: dirname(top), inPackage: true };
+}
+
+/**
  * Build the [command, args] to start a service on `hostPort`, using what
  * installDeps prepared. Also sets port-related env vars each stack reads.
  */
@@ -1037,17 +1102,32 @@ function buildStartCommand({ runtime, hostPort, processEnv, cwd, prepared = {} }
       processEnv.FLASK_RUN_PORT = port;
       processEnv.FLASK_RUN_HOST = '0.0.0.0';
       const appFile = runtime.start?.split(' ').pop() || 'app.py';
+      const target = pythonImportTarget(cwd, appFile);
       // An app with no app.run() / __main__ block exits immediately when run
       // as a script — serve it through `flask run` instead.
       const src = readFileSafe(join(cwd, appFile)) || '';
       if (!/\.run\(|__main__/.test(src)) {
-        return { startCmd: PY, startArgs: ['-m', 'flask', '--app', appFile.replace(/\.py$/, '').replace(/[\\/]/g, '.'), 'run', '--host', '0.0.0.0', '--port', port] };
+        return { startCmd: PY, startArgs: ['-m', 'flask', '--app', target.module, 'run', '--host', '0.0.0.0', '--port', port], cwd: target.runCwd };
       }
-      return { startCmd: PY, startArgs: [appFile] };
+      return target.inPackage
+        ? { startCmd: PY, startArgs: ['-m', target.module], cwd: target.runCwd }
+        : { startCmd: PY, startArgs: [appFile] };
     }
     case 'python-fastapi': {
-      const modulePart = runtime.start?.match(/uvicorn\s+(\S+)/)?.[1] || 'main:app';
-      return { startCmd: PY, startArgs: ['-m', 'uvicorn', modulePart, '--host', '0.0.0.0', '--port', port] };
+      const [modulePath, declaredVar] = (runtime.start?.match(/uvicorn\s+(\S+)/)?.[1] || 'main:app').split(':');
+      const file = `${modulePath.replace(/\./g, '/')}.py`;
+      const target = pythonImportTarget(cwd, file);
+      // An app built by a factory (def create_app(): ...) with no module-level
+      // FastAPI instance is served with --factory.
+      const src = readFileSafe(join(cwd, file)) || '';
+      const hasInstance = new RegExp(`^${declaredVar || 'app'}\\s*=`, 'm').test(src);
+      const factory = !hasInstance && src.match(/^def\s+(create_app|get_app|make_app|build_app)\s*\(/m)?.[1];
+      const spec = `${target.module}:${factory || declaredVar || 'app'}`;
+      return {
+        startCmd: PY,
+        startArgs: ['-m', 'uvicorn', spec, ...(factory ? ['--factory'] : []), '--host', '0.0.0.0', '--port', port],
+        cwd: target.runCwd,
+      };
     }
     case 'python-django':
       return { startCmd: PY, startArgs: [runtime.manage || 'manage.py', 'runserver', `0.0.0.0:${port}`] };
@@ -1075,8 +1155,13 @@ function buildStartCommand({ runtime, hostPort, processEnv, cwd, prepared = {} }
       ].join('\n'));
       return { startCmd: PY, startArgs: ['-m', 'jupyterlab', '--config=.rr-jupyter-config.py'] };
     }
-    case 'python':
-      return { startCmd: PY, startArgs: [runtime.start?.split(' ').pop() || 'main.py'] };
+    case 'python': {
+      const entry = runtime.start?.split(' ').pop() || 'main.py';
+      const target = pythonImportTarget(cwd, entry);
+      return target.inPackage
+        ? { startCmd: PY, startArgs: ['-m', target.module], cwd: target.runCwd }
+        : { startCmd: PY, startArgs: [entry] };
+    }
 
     case 'node': {
       processEnv.BROWSER = 'none'; // create-react-app would open a browser tab
@@ -1356,6 +1441,9 @@ export async function startNativeProcess({ sessionId, repoDir, runtime, envVars,
   try {
     writeEnvFile(cwd, envVars, onOutput);
     const processEnv = { ...baseProcessEnv(envVars), PORT: String(hostPort) };
+    // An orchestrating script gives each service its own port; a shared PORT
+    // would make them collide.
+    if (runtime.orchestrated) delete processEnv.PORT;
 
     await prepareToolchain({ runtime, cwd, processEnv, onOutput });
 
@@ -1370,11 +1458,11 @@ export async function startNativeProcess({ sessionId, repoDir, runtime, envVars,
     }
 
     onOutput(`\n[start] Starting app on port ${hostPort}...\n`);
-    const { startCmd, startArgs } = buildStartCommand({ runtime, hostPort, processEnv, cwd, prepared });
-    const observer = createPortObserver();
+    const { startCmd, startArgs, cwd: runCwd } = buildStartCommand({ runtime, hostPort, processEnv, cwd, prepared });
+    const observer = createPortObserver({ avoid: runtime.orchestrated?.backendPorts });
     let policyBlocked = false;
     const appProcess = spawnApp({
-      startCmd, startArgs, cwd, processEnv,
+      startCmd, startArgs, cwd: runCwd || cwd, processEnv,
       onOutput: (t) => {
         observer.scan(t);
         if (/Application Control policy has blocked|Device Guard policy/i.test(t)) policyBlocked = true;
@@ -1457,9 +1545,9 @@ export async function startCompoundNative({ sessionId, repoDir, services, envVar
     } catch (err) {
       onOutput(`\n[warning] Backend install warning: ${err.message}\n`);
     }
-    const { startCmd, startArgs } = buildStartCommand({ runtime: backend.runtime, hostPort: backendPort, processEnv: bEnv, cwd, prepared });
+    const { startCmd, startArgs, cwd: runCwd } = buildStartCommand({ runtime: backend.runtime, hostPort: backendPort, processEnv: bEnv, cwd, prepared });
     onOutput(`\n[start] Starting backend...\n`);
-    processes.push(spawnApp({ startCmd, startArgs, cwd, processEnv: bEnv, onOutput }));
+    processes.push(spawnApp({ startCmd, startArgs, cwd: runCwd || cwd, processEnv: bEnv, onOutput }));
     try {
       await waitForPort(backendPort, 120000);
       onOutput(`\n[ready] Backend live on port ${backendPort}\n`);
@@ -1503,11 +1591,11 @@ export async function startCompoundNative({ sessionId, repoDir, services, envVar
   } catch (err) {
     onOutput(`\n[warning] Frontend install warning: ${err.message}\n`);
   }
-  const { startCmd, startArgs } = buildStartCommand({ runtime: frontend.runtime, hostPort: frontPort, processEnv: fEnv, cwd: fcwd, prepared: fPrepared });
+  const { startCmd, startArgs, cwd: fRunCwd } = buildStartCommand({ runtime: frontend.runtime, hostPort: frontPort, processEnv: fEnv, cwd: fcwd, prepared: fPrepared });
   onOutput(`\n[start] Starting frontend...\n`);
   const observer = createPortObserver();
   processes.push(spawnApp({
-    startCmd, startArgs, cwd: fcwd, processEnv: fEnv,
+    startCmd, startArgs, cwd: fRunCwd || fcwd, processEnv: fEnv,
     onOutput: (t) => { observer.scan(t); onOutput(t); },
   }));
 

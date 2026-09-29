@@ -830,6 +830,33 @@ export function getDockerImage(runtimeId) {
   return images[runtimeId] || 'ubuntu:22.04';
 }
 
+/**
+ * Full-stack repos often start everything from one root script, e.g.
+ *   "dev": "concurrently \"vite dev\" \"python -m uvicorn agents.main:app --port 8787\""
+ * Running that script is the most faithful way to run them: the frontend
+ * already expects the backend where the script puts it. Returns
+ * { script, pythonDirs, backendPorts } or null.
+ */
+export function detectOrchestratedScript(repoDir) {
+  const pkg = readJsonSafe(join(repoDir, 'package.json'));
+  const name = pkg?.scripts?.dev ? 'dev' : pkg?.scripts?.start ? 'start' : null;
+  const script = name ? pkg.scripts[name] : '';
+  const launchesOther = /\b(uvicorn|gunicorn|flask\s+run|python3?\s|py\s+-|manage\.py|go\s+run|cargo\s+run|dotnet\s+run|php\s+artisan|rails\s+s)/.test(script);
+  const runsSeveral = /concurrently|npm-run-all|run-p\b|\s&\s|turbo\s/.test(script);
+  if (!launchesOther || !runsSeveral) return null;
+
+  // Python deps: the root, plus folders the script names (agents.main → agents/).
+  const pythonDirs = [];
+  const hasPyManifest = (d) => ['requirements.txt', 'pyproject.toml'].some((f) => existsSync(join(repoDir, d, f)));
+  if (hasPyManifest('')) pythonDirs.push('');
+  for (const m of script.matchAll(/(?:^|[\s"'(/])([A-Za-z_][\w-]*)(?:[./][\w.]+)*:[A-Za-z_]\w*|cd\s+([\w./-]+)|([\w-]+)\/[\w/-]+\.py/g)) {
+    const dir = (m[1] || m[2] || m[3] || '').replace(/\/+$/, '');
+    if (dir && !pythonDirs.includes(dir) && existsSync(join(repoDir, dir)) && hasPyManifest(dir)) pythonDirs.push(dir);
+  }
+  const backendPorts = [...script.matchAll(/(?:--port|-p|--bind\s+[\d.]+:|PORT=)\s*=?\s*(\d{2,5})/g)].map((m) => Number(m[1]));
+  return { script: name, pythonDirs, backendPorts };
+}
+
 // --- Helpers ---
 
 /** npm / pnpm / yarn / bun, from the lockfile or package.json "packageManager". */
