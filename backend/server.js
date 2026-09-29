@@ -6,8 +6,6 @@ import express from 'express';
 import cors from 'cors';
 import { WebSocketServer } from 'ws';
 import { createServer } from 'http';
-import httpProxy from 'http-proxy';
-const { createProxyServer } = httpProxy;
 import simpleGit from 'simple-git';
 import { v4 as uuid } from 'uuid';
 import { join } from 'path';
@@ -22,7 +20,10 @@ import {
   stopNativeProcess,
   getNativeSession,
   cleanupAllNative,
+  writeToSession,
+  listPreviewSessions,
 } from './native-runner.js';
+import { openPortProxy, closePortProxy, sweepPortProxies, createPathProxy } from './preview-proxy.js';
 // Docker is optional — the server starts even if Docker Desktop isn't running.
 // We create the instance lazily and never let it crash the startup.
 let dockerCheck = null;
@@ -35,8 +36,8 @@ try {
 
 const app = express();
 const server = createServer(app);
-const wss = new WebSocketServer({ server, path: '/ws' });
-const proxy = createProxyServer();
+// noServer: upgrades are routed below, since previews need WebSockets too.
+const wss = new WebSocketServer({ noServer: true });
 
 const PORT = process.env.PORT || 3001;
 const REPOS_DIR = join(process.cwd(), '.repos');
@@ -46,8 +47,17 @@ if (!existsSync(REPOS_DIR)) {
   mkdirSync(REPOS_DIR, { recursive: true });
 }
 
+// Chrome's Private Network Access: lets a page on the public web (e.g. the
+// Vercel-hosted UI) talk to a backend running on the visitor's own machine.
+app.use((req, res, next) => {
+  if (req.headers['access-control-request-private-network']) {
+    res.setHeader('Access-Control-Allow-Private-Network', 'true');
+  }
+  next();
+});
 app.use(cors());
-app.use(express.json());
+// Only the API takes JSON; preview requests must reach the app with their body intact.
+app.use('/api', express.json());
 
 // Track WebSocket clients per session
 const wsClients = new Map(); // sessionId -> Set<ws>
@@ -74,7 +84,55 @@ wss.on('connection', (ws, req) => {
     }
   });
 
+  // Terminal input typed in the UI → the running program's stdin.
+  ws.on('message', (raw) => {
+    try {
+      const msg = JSON.parse(raw.toString());
+      if (msg.type === 'input' && typeof msg.data === 'string') writeToSession(sessionId, msg.data);
+    } catch {
+      // ignore malformed messages
+    }
+  });
+
   ws.send(JSON.stringify({ type: 'connected', sessionId }));
+});
+
+// ─── Previews ───
+
+const previewTarget = (id) => getNativeSession(id)?.hostPort || getSession(id)?.hostPort || null;
+const soleSession = () => {
+  const ids = listPreviewSessions();
+  return ids.length === 1 ? ids[0] : null;
+};
+const pathProxy = createPathProxy({ targetFor: previewTarget, soleSession });
+
+setInterval(() => sweepPortProxies((id) => !!previewTarget(id)), 60_000).unref();
+
+function isLocalRequest(req) {
+  const host = (req.headers['x-forwarded-host'] || req.headers.host || '').replace(/:\d+$/, '');
+  return ['localhost', '127.0.0.1', '[::1]'].includes(host);
+}
+
+/**
+ * Where the browser should load a session's preview. A local backend gives
+ * each session its own proxy port; a deployed one serves it under
+ * /preview/<id>/ on its public URL.
+ */
+async function previewUrlFor(req, sessionId, port) {
+  if (isLocalRequest(req)) {
+    return `http://localhost:${await openPortProxy(sessionId, port)}`;
+  }
+  const proto = (req.headers['x-forwarded-proto'] || req.protocol).split(',')[0];
+  const host = req.headers['x-forwarded-host'] || req.headers.host;
+  return `${proto}://${host}/preview/${sessionId}/`;
+}
+
+server.on('upgrade', (req, socket, head) => {
+  if (req.url.startsWith('/ws?') || req.url === '/ws') {
+    wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req));
+  } else {
+    pathProxy.upgrade(req, socket, head);
+  }
 });
 
 function broadcast(sessionId, data) {
@@ -257,7 +315,13 @@ app.post('/api/run-native', async (req, res) => {
 
   try {
     const onOutput = (text) => broadcast(sessionId, { type: 'output', text });
-    const { hostPort, failed } = isCompound
+    // A slow app (e.g. Spring Boot) may open its port after we've responded.
+    const onReady = async (port) => {
+      const url = await previewUrlFor(req, sessionId, port);
+      broadcast(sessionId, { type: 'stage', stage: 'ready', message: 'App is running!', previewUrl: url });
+      broadcast(sessionId, { type: 'server-ready', url, port });
+    };
+    const { hostPort, failed, finished } = isCompound
       ? await startCompoundNative({ sessionId, repoDir, services, envVars: envVars || {}, onOutput })
       : await startNativeProcess({
           sessionId,
@@ -265,6 +329,7 @@ app.post('/api/run-native', async (req, res) => {
           runtime,
           envVars: envVars || {},
           onOutput,
+          onReady,
         });
 
     // No port: either a console program (C/C++, expected) or the app failed to
@@ -273,7 +338,7 @@ app.post('/api/run-native', async (req, res) => {
       if (failed) {
         broadcast(sessionId, {
           type: 'error',
-          message: 'The app started but never opened a web server — it likely crashed. Check the terminal output above for the error.',
+          message: 'The app exited before opening a web server — check the terminal output for the error.',
         });
         res.status(200).json({ ok: false, previewUrl: null, port: null, mode: 'native-failed' });
         return;
@@ -281,13 +346,15 @@ app.post('/api/run-native', async (req, res) => {
       broadcast(sessionId, {
         type: 'stage',
         stage: 'ready',
-        message: 'Program is running (console output in the terminal).',
+        message: finished
+          ? 'Program finished — its output is in the terminal.'
+          : 'Program is running (console output in the terminal).',
       });
       res.json({ ok: true, previewUrl: null, port: null, mode: 'native-console' });
       return;
     }
 
-    const previewUrl = `http://localhost:${hostPort}`;
+    const previewUrl = await previewUrlFor(req, sessionId, hostPort);
 
     broadcast(sessionId, {
       type: 'stage',
@@ -318,6 +385,8 @@ app.post('/api/run-native', async (req, res) => {
  */
 app.post('/api/stop/:sessionId', async (req, res) => {
   const { sessionId } = req.params;
+
+  closePortProxy(sessionId);
 
   // Check if it's a native session first
   const nativeSession = getNativeSession(sessionId);
@@ -388,43 +457,13 @@ app.get('/api/status/:sessionId', (req, res) => {
 });
 
 /**
- * Proxy preview requests to the running container.
- * GET /preview/:sessionId/*
+ * Previews on a deployed backend: /preview/<sessionId>/... proxies to the
+ * app (native or Docker). Must come after the API routes; the fallback catches
+ * absolute-path requests (/static/app.css) made from inside a preview.
  */
-app.all('/preview/:sessionId/*', (req, res) => {
-  const session = getSession(req.params.sessionId);
-  if (!session) {
-    return res.status(404).send('Session not found or container not running.');
-  }
-
-  // Rewrite the URL to strip the /preview/:sessionId prefix
-  req.url = req.url.replace(`/preview/${req.params.sessionId}`, '') || '/';
-
-  proxy.web(req, res, {
-    target: `http://127.0.0.1:${session.hostPort}`,
-    changeOrigin: true,
-  });
-});
-
-// Also handle the case without trailing path
-app.all('/preview/:sessionId', (req, res) => {
-  const session = getSession(req.params.sessionId);
-  if (!session) {
-    return res.status(404).send('Session not found.');
-  }
-  proxy.web(req, res, {
-    target: `http://127.0.0.1:${session.hostPort}`,
-    changeOrigin: true,
-  });
-});
-
-// Handle proxy errors gracefully
-proxy.on('error', (err, req, res) => {
-  if (res.writeHead) {
-    res.writeHead(502, { 'Content-Type': 'text/plain' });
-    res.end('App is still starting up... Refresh in a moment.');
-  }
-});
+app.all('/preview/:sessionId', pathProxy.prefixed);
+app.all('/preview/:sessionId/*', pathProxy.prefixed);
+app.use(pathProxy.fallback);
 
 // Graceful shutdown
 process.on('SIGINT', async () => {
