@@ -12,18 +12,32 @@ have anyone run code on; keep it private (or behind your own auth) otherwise.
 
 ## UI → Vercel
 
-1. Vercel dashboard → **New Project → Import** this repo.
-2. Framework preset: **Vite**. `vercel.json` already sets the build and the
-   COOP/COEP headers the in-browser runtimes need.
-3. Environment variables (optional):
+1. Vercel dashboard → **New Project → Import** this repo (leave Root Directory empty).
+2. Nothing to configure for the build: `vercel.json` sets the Vite build, the
+   COOP/COEP headers the in-browser runtimes need, SPA routing, asset caching,
+   and the `/api/github` function.
+3. Environment variables (all optional):
+   - `GITHUB_TOKEN` — a read-only GitHub token (fine-grained, public repos). Used
+     server-side by `api/github.js` when a visitor's own 60 requests/hour run out;
+     it's never sent to the browser. Recommended.
    - `VITE_BACKEND_URL` — your deployed engine's URL (see below).
-   - `VITE_GITHUB_TOKEN` — only for private use; it's bundled into the page.
+   - `VITE_GITHUB_TOKEN` — don't set this on a public deployment: it's bundled
+     into the page. Visitors can enter their own token with the **Token** button.
 4. Deploy.
 
-Without `VITE_BACKEND_URL`, visitors can still connect an engine running on
-their own machine: when a repo needs one, the page shows the command to start it
-and a **Connect local engine** button. The page never contacts the visitor's
-localhost before they click it (browsers ask permission for that).
+Without `VITE_BACKEND_URL`, visitors can still connect an engine: when a repo
+needs one, the page shows the command to run it locally and a URL box
+(`http://localhost:3001` by default, or any deployed engine) with a **Connect
+engine** button. The page never contacts the visitor's localhost before they click
+it — Chrome asks them to allow local network access at that point.
+
+Browsers: Chrome, Edge and Firefox run everything. Safari can't isolate the page
+(no `credentialless` COEP), so Node repos don't run in it in-browser; the page
+says so.
+
+WebContainers (the in-browser Node runtime) are free for personal and
+open-source use; a commercial, for-profit deployment needs a
+[StackBlitz license](https://webcontainers.io/enterprise).
 
 ## Engine → Railway / Render / Fly
 
