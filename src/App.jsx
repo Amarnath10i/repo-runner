@@ -8,7 +8,7 @@ import { runStaticSite } from './lib/static-runner.js';
 import { runPythonInBrowser, buildStlitePage } from './lib/python-runner.js';
 import { planBrowserRun } from './lib/browser-plan.js';
 import { analyzeRepo, checkOllamaAvailable } from './lib/ollama.js';
-import { analyzeTreeLocally, detectStack, isPromptableSecret } from './lib/heuristics.js';
+import { analyzeTreeLocally, detectStack, isPromptableSecret, treeWebContainerBlocker } from './lib/heuristics.js';
 import {
   analyzeRepoBackend,
   runRepoBackend,
@@ -116,6 +116,8 @@ export default function App() {
   const wsRef = useRef(null);
   const fellBackRef = useRef(false);
   const repoUrlRef = useRef('');
+  const branchRef = useRef(null);
+  const planRef = useRef(null); // how the repo could run in the browser, if at all
   const pythonRef = useRef(null);
   const inputTargetRef = useRef(null); // (line) => void — where terminal input goes
   const lastLineRef = useRef('');
@@ -270,6 +272,7 @@ export default function App() {
     analysisRef.current = null;
     sessionRef.current = null;
     fellBackRef.current = false;
+    planRef.current = null;
   }
 
   function setInputTarget(fn) {
@@ -296,9 +299,10 @@ export default function App() {
     setStage(STAGES.FETCHING);
 
     try {
-      const url = normalizeRepoUrl(repoUrl);
-      repoUrlRef.current = url;
-      const { owner, repo, branch: urlBranch } = parseGithubUrl(url);
+      const { owner, repo, branch: urlBranch } = parseGithubUrl(normalizeRepoUrl(repoUrl));
+      // The engine gets a clean clone URL; a /tree/<branch> is sent separately.
+      repoUrlRef.current = `https://github.com/${owner}/${repo}`;
+      branchRef.current = urlBranch;
       setRepoName(`${owner}/${repo}`);
       // 'HEAD' is the default branch — saves a GitHub API call.
       const branch = urlBranch || 'HEAD';
@@ -317,8 +321,10 @@ export default function App() {
 
       // ── Analysis ──
       setStage(STAGES.ANALYZING);
-      let analysis = null;
-      if (useOllama) {
+      // The built-in heuristics are instant and reliable for known stacks; a
+      // local Ollama model is only consulted when they can't tell.
+      let analysis = analyzeTreeLocally(tree);
+      if (analysis.runtime === 'unknown' && useOllama) {
         writeLog(`\n\x1b[1;35m▸ Asking Ollama to analyze the repo…\x1b[0m\n`);
         const ollamaResult = await analyzeRepo({
           tree,
@@ -327,17 +333,15 @@ export default function App() {
           onProgress: (msg) => writeLog(msg),
         });
         if (ollamaResult.ok) {
-          analysis = ollamaResult;
-          writeLog(`\n  Runtime: \x1b[33m${analysis.runtime}\x1b[0m\n`);
-          if (analysis.reasoning) writeLog(`  Reasoning: ${analysis.reasoning}\n`);
-        } else {
-          writeLog(`  Ollama unavailable: ${ollamaResult.reason}\n`);
+          // Never trust a "runs in the browser" answer for a repo with a known blocker.
+          const blocker = treeWebContainerBlocker(tree);
+          analysis = blocker && ollamaResult.canRunInBrowserSandbox
+            ? { ...ollamaResult, canRunInBrowserSandbox: false, reasoning: blocker }
+            : ollamaResult;
+          if (analysis.reasoning) writeLog(`  ${analysis.reasoning}\n`);
         }
       }
-      if (!analysis) {
-        analysis = analyzeTreeLocally(tree);
-        writeLog(`\n\x1b[1;35m▸ Detected: ${analysis.runtime} project\x1b[0m\n`);
-      }
+      writeLog(`\n\x1b[1;35m▸ Detected: ${analysis.runtime} project\x1b[0m\n`);
       analysisRef.current = analysis;
 
       // ── Decide where it runs ──
@@ -351,6 +355,7 @@ export default function App() {
       const status = await refreshBackendStatus(0);
       const stack = analysis.runtime === 'node' ? 'node' : detectStack(tree).runtime;
       const plan = planBrowserRun(tree, stack);
+      planRef.current = plan;
 
       // Static sites are always served in-browser; Python goes to the engine
       // when there is one (full CPython, any package), otherwise Pyodide.
@@ -374,7 +379,7 @@ export default function App() {
 
       // ── Engine (backend) ──
       writeLog(`\n\x1b[1;33m▸ Cloning on the runner engine…\x1b[0m\n`);
-      const backendAnalysis = await analyzeRepoBackend({ repoUrl: repoUrlRef.current, token });
+      const backendAnalysis = await analyzeRepoBackend({ repoUrl: repoUrlRef.current, branch: branchRef.current, token });
       sessionRef.current = backendAnalysis.sessionId;
       setRuntimeInfo(backendAnalysis.runtime);
       writeLog(`\x1b[1;32m✓ Detected: ${backendAnalysis.runtime.label}\x1b[0m\n`);
@@ -536,7 +541,7 @@ export default function App() {
     writeLog(`\x1b[1;36m▸ Retrying on the runner engine…\x1b[0m\n`);
     setStage(STAGES.ANALYZING);
     try {
-      const backendAnalysis = await analyzeRepoBackend({ repoUrl: repoUrlRef.current, token });
+      const backendAnalysis = await analyzeRepoBackend({ repoUrl: repoUrlRef.current, branch: branchRef.current, token });
       sessionRef.current = backendAnalysis.sessionId;
       setRuntimeInfo(backendAnalysis.runtime);
       if (backendAnalysis.nativeAvailable) {
@@ -570,7 +575,9 @@ export default function App() {
         setStage(STAGES.READY);
         writeLog(`\n\x1b[1;32m✓ App is live!\x1b[0m\n`);
       },
-      onError: (msg) => fail(msg),
+      // When the browser can run this repo too, a failed engine run falls
+      // back to it (startNativeRun) instead of ending on an error.
+      onError: (msg) => (canRunInBrowser() ? writeLog(`\n\x1b[33m⚠ ${msg}\x1b[0m\n`) : fail(msg)),
     });
     wsRef.current = conn;
     setInputTarget((line) => {
@@ -594,11 +601,44 @@ export default function App() {
     setStage(STAGES.BUILDING);
     writeLog(`\n\x1b[1;36m▸ Setting up the environment…\x1b[0m\n`);
     connectEngine(sessionId);
+    let result;
     try {
-      const result = await runRepoNative({ sessionId, envVars });
-      if (result?.mode === 'native-console') setIsTerminalOpen(true);
+      result = await runRepoNative({ sessionId, envVars });
     } catch (err) {
-      fail(err.message);
+      result = { ok: false, error: err.message };
+    }
+    if (result?.mode === 'native-console') setIsTerminalOpen(true);
+    if (result?.ok !== false) return;
+    if (canRunInBrowser()) {
+      await fallbackToBrowser(envVars, result.blocked ? 'Windows blocked it on this PC' : 'it failed on the engine');
+    } else if (result.error) {
+      fail(result.error);
+    }
+  }
+
+  /** Could this repo run in the browser instead (Python, static site, Node)? */
+  function canRunInBrowser() {
+    return !!planRef.current?.kind || (analysisRef.current?.runtime === 'node' && !fellBackRef.current);
+  }
+
+  /** The engine run failed — run the repo in the browser instead. */
+  async function fallbackToBrowser(envVars, reason) {
+    writeLog(`\n\x1b[1;33m▸ The engine run didn't work (${reason}) — running it in your browser instead…\x1b[0m\n`);
+    const id = sessionRef.current;
+    sessionRef.current = null;
+    wsRef.current?.close();
+    wsRef.current = null;
+    if (id) stopRepoBackend(id).catch(() => {});
+    setPreviewUrl('');
+    setErrorMsg('');
+    if (planRef.current?.kind) {
+      const plan = planRef.current;
+      planRef.current = null; // don't loop
+      await startBrowserRun(plan);
+    } else {
+      fellBackRef.current = true;
+      setExecutionMode('webcontainer');
+      await startWebContainerRun(treeRef.current, envVars || {});
     }
   }
 

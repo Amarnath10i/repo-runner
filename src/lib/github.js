@@ -7,9 +7,11 @@
 const API = 'https://api.github.com';
 
 export function parseGithubUrl(input) {
-  const cleaned = input.trim().replace(/\.git$/, '');
+  // Drop ?tab=readme-ov-file, #readme and a trailing slash or .git — all common
+  // in URLs copied from the browser.
+  const cleaned = input.trim().replace(/[?#].*$/, '').replace(/\/+$/, '').replace(/\.git$/, '');
   const match = cleaned.match(
-    /github\.com\/([^/]+)\/([^/]+)(?:\/tree\/([^/]+))?/
+    /github\.com\/([^/\s]+)\/([^/\s]+)(?:\/tree\/([^/\s]+))?/i
   );
   if (!match) {
     throw new Error(
@@ -17,7 +19,7 @@ export function parseGithubUrl(input) {
     );
   }
   const [, owner, repo, branch] = match;
-  return { owner, repo, branch: branch || null };
+  return { owner, repo, branch: branch ? decodeURIComponent(branch) : null };
 }
 
 async function ghFetch(path, token) {

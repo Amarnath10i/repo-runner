@@ -58,8 +58,8 @@ async function postJson(path, body) {
 }
 
 /** Clone a repo on the engine and detect its runtime. */
-export function analyzeRepoBackend({ repoUrl, token }) {
-  return postJson('/api/analyze', { repoUrl, token });
+export function analyzeRepoBackend({ repoUrl, branch, token }) {
+  return postJson('/api/analyze', { repoUrl, branch, token });
 }
 
 /** Run a previously analyzed repo in a Docker sandbox. */
