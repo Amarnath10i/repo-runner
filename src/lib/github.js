@@ -57,6 +57,7 @@ const KEY_FILENAMES = new Set([
   'Dockerfile', 'docker-compose.yml', 'docker-compose.yaml', 'compose.yml',
   'CMakeLists.txt', 'Makefile', 'tsconfig.json',
   'vite.config.js', 'vite.config.ts', 'next.config.js', 'next.config.mjs',
+  'runtime.txt', '.python-version', 'deno.json', 'deno.jsonc',
 ]);
 
 /**
@@ -64,7 +65,9 @@ const KEY_FILENAMES = new Set([
  * skeleton tree (file nodes with `contents: null`), then hydrate only the
  * manifest/config files the analyzer needs. This is fast even for repos with
  * hundreds of files — we don't download every blob just to detect the runtime.
- * Returns { tree, blobs } so a WebContainer run can later hydrate the rest.
+ * Returns { tree, blobs } so an in-browser run can later hydrate the rest.
+ *
+ * `branch` may be 'HEAD' (the default branch) — that saves an API call.
  */
 export async function fetchRepoTree({ owner, repo, branch, token, onProgress }) {
   const treeData = await ghFetch(
@@ -85,71 +88,81 @@ export async function fetchRepoTree({ owner, repo, branch, token, onProgress }) 
   }
   onProgress?.(`Fetched file list (${blobs.length} files).`);
 
-  // Hydrate only the files analysis needs.
-  const keyBlobs = blobs.filter((b) => KEY_FILENAMES.has(b.path.split('/').pop()));
-  let done = 0;
-  const BATCH_SIZE = 8;
-  for (let i = 0; i < keyBlobs.length; i += BATCH_SIZE) {
-    await Promise.all(
-      keyBlobs.slice(i, i + BATCH_SIZE).map(async (entry) => {
-        const blob = await ghFetch(`/repos/${owner}/${repo}/git/blobs/${entry.sha}`, token);
-        insertIntoTree(root, entry.path.split('/'), decodeBlob(blob));
-        done += 1;
-        onProgress?.(`Analyzed ${done}/${keyBlobs.length} manifest file(s).`);
-      })
-    );
-  }
+  // Hydrate only the files analysis needs (plus Python sources, which are
+  // small and let the in-browser planner see what a script imports).
+  const keyBlobs = blobs.filter((b) =>
+    KEY_FILENAMES.has(b.path.split('/').pop()) || (!b.path.includes('/') && b.path.endsWith('.py'))
+  );
+  await downloadBlobs({ owner, repo, branch, token, tree: root, entries: keyBlobs, onProgress, label: 'manifest file(s)' });
 
   return { tree: root, blobs };
 }
 
 /**
- * Phase 2 (WebContainer only): download the contents of every remaining blob
- * so the tree can be mounted into the in-browser Node sandbox.
+ * Phase 2 (in-browser runs only): download the contents of every remaining
+ * blob so the tree can be mounted into the in-browser sandbox.
  */
-export async function hydrateAllFiles({ owner, repo, token, tree, blobs, onProgress }) {
+export async function hydrateAllFiles({ owner, repo, branch = 'HEAD', token, tree, blobs, onProgress }) {
   const pending = blobs.filter((entry) => {
     const node = getNode(tree, entry.path.split('/'));
     return !node?.file || node.file.contents === null;
   });
-
-  let done = 0;
-  const BATCH_SIZE = 8;
-  for (let i = 0; i < pending.length; i += BATCH_SIZE) {
-    await Promise.all(
-      pending.slice(i, i + BATCH_SIZE).map(async (entry) => {
-        const blob = await ghFetch(`/repos/${owner}/${repo}/git/blobs/${entry.sha}`, token);
-        insertIntoTree(tree, entry.path.split('/'), decodeBlob(blob));
-        done += 1;
-        onProgress?.(`Downloaded ${done}/${pending.length} files: ${entry.path}`);
-      })
-    );
+  const skipped = pending.filter((e) => e.size > MAX_FILE_BYTES);
+  for (const e of skipped) {
+    insertIntoTree(tree, e.path.split('/'), '');
+    onProgress?.(`Skipped ${e.path} (${(e.size / 1048576).toFixed(0)} MB — too large for the browser sandbox)`);
   }
+  const entries = pending.filter((e) => !(e.size > MAX_FILE_BYTES));
+  await downloadBlobs({ owner, repo, branch, token, tree, entries, onProgress, label: 'files' });
   return tree;
 }
+
+// Files larger than this are left empty in the browser sandbox (datasets,
+// model weights, videos) — they'd make the run crawl or run out of memory.
+const MAX_FILE_BYTES = 25 * 1024 * 1024;
+
+const BINARY_EXT = /\.(png|jpe?g|gif|webp|avif|ico|bmp|tiff?|svgz|woff2?|ttf|otf|eot|mp[34]|webm|ogg|wav|flac|m4a|mov|avi|pdf|zip|gz|tgz|bz2|xz|7z|rar|jar|war|class|so|dll|dylib|exe|bin|wasm|pyc|npy|npz|pkl|pickle|pt|pth|h5|hdf5|onnx|tflite|parquet|feather|sqlite3?|db|xlsx?|docx?|pptx?)$/i;
 
 /**
- * Back-compat: fetch the full tree with every blob hydrated in one call.
+ * Download file contents. raw.githubusercontent.com serves files with CORS and
+ * isn't subject to the 60-requests/hour API limit, so a repo of any size costs
+ * no API calls; the blob API is only a fallback (e.g. private repos).
  */
-export async function buildFileSystemTree(opts) {
-  const { tree, blobs } = await fetchRepoTree(opts);
-  await hydrateAllFiles({ ...opts, tree, blobs });
-  return tree;
+async function downloadBlobs({ owner, repo, branch, token, tree, entries, onProgress, label }) {
+  let done = 0;
+  const CONCURRENCY = 16;
+  let next = 0;
+  const worker = async () => {
+    while (next < entries.length) {
+      const entry = entries[next++];
+      const contents = await fetchFileContents({ owner, repo, branch, token, entry });
+      insertIntoTree(tree, entry.path.split('/'), contents);
+      done += 1;
+      if (done === entries.length || done % 10 === 0) {
+        onProgress?.(`Downloaded ${done}/${entries.length} ${label}`);
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(CONCURRENCY, entries.length) }, worker));
 }
 
-function decodeBlob(blob) {
-  if (blob.encoding === 'base64') {
-    // Decode as UTF-8 text. Binary files (images, fonts) will come through
-    // mangled — fine for running most Node/web repos, not a general VCS clone.
-    const binary = atob(blob.content.replace(/\n/g, ''));
-    try {
-      const bytes = Uint8Array.from(binary, (c) => c.charCodeAt(0));
-      return new TextDecoder('utf-8', { fatal: false }).decode(bytes);
-    } catch {
-      return binary;
-    }
+async function fetchFileContents({ owner, repo, branch, token, entry }) {
+  const binary = BINARY_EXT.test(entry.path);
+  const rawUrl = `https://raw.githubusercontent.com/${owner}/${repo}/${branch}/${entry.path.split('/').map(encodeURIComponent).join('/')}`;
+  try {
+    const res = await fetch(rawUrl, token ? { headers: { Authorization: `Bearer ${token}` } } : undefined);
+    if (res.ok) return binary ? new Uint8Array(await res.arrayBuffer()) : await res.text();
+  } catch {
+    // fall through to the API
   }
-  return blob.content;
+  const blob = await ghFetch(`/repos/${owner}/${repo}/git/blobs/${entry.sha}`, token);
+  return decodeBlob(blob, binary);
+}
+
+function decodeBlob(blob, binary) {
+  if (blob.encoding !== 'base64') return blob.content;
+  const bytes = Uint8Array.from(atob(blob.content.replace(/\n/g, '')), (c) => c.charCodeAt(0));
+  return binary ? bytes : new TextDecoder('utf-8', { fatal: false }).decode(bytes);
 }
 
 function insertIntoTree(root, pathParts, contents) {
