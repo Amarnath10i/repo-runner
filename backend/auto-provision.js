@@ -449,6 +449,33 @@ async function installRust({ url, toolDir, tool, onOutput }) {
   return join(toolDir, 'cargo', 'bin');
 }
 
+// ─── .NET SDK ───
+// Installed with Microsoft's dotnet-install script; channels install side by
+// side in one folder, so a repo needing .NET 9 doesn't disturb one on .NET 8.
+
+const DOTNET_DIR = join(PROVISION_DIR, 'dotnet');
+
+export function dotnetEnv() {
+  return { pathDirs: [DOTNET_DIR], vars: { DOTNET_ROOT: DOTNET_DIR, DOTNET_MULTILEVEL_LOOKUP: '0' } };
+}
+
+export async function ensureDotnetSdk(channel, onOutput) {
+  const marker = join(DOTNET_DIR, `.provisioned-${channel}`);
+  if (existsSync(marker)) return dotnetEnv();
+  mkdirSync(DOTNET_DIR, { recursive: true });
+  onOutput?.(`\n🟣 .NET ${channel} SDK not found — downloading it (one-time setup)...\n`);
+  const script = join(PROVISION_DIR, IS_WIN ? 'dotnet-install.ps1' : 'dotnet-install.sh');
+  await downloadFile(`https://dot.net/v1/${IS_WIN ? 'dotnet-install.ps1' : 'dotnet-install.sh'}`, script);
+  const r = IS_WIN
+    ? await runAsync('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script,
+      '-Channel', channel, '-InstallDir', DOTNET_DIR, '-NoPath'])
+    : await runAsync('bash', [script, '--channel', channel, '--install-dir', DOTNET_DIR, '--no-path']);
+  if (r.code !== 0) throw new Error(`Installing the .NET ${channel} SDK failed: ${r.output.slice(-400)}`);
+  writeFileSync(marker, new Date().toISOString());
+  onOutput?.(`✅ .NET ${channel} SDK ready.\n\n`);
+  return dotnetEnv();
+}
+
 function hasMsvcBuildTools() {
   const vswhere = join(process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)', 'Microsoft Visual Studio', 'Installer', 'vswhere.exe');
   if (!existsSync(vswhere)) return false;

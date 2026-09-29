@@ -963,7 +963,7 @@ function findPythonEntry(dir, candidates) {
 const SKIP_DIRS = new Set([
   'node_modules', '.git', 'dist', 'build', '.next',
   'vendor', '__pycache__', '.venv', 'venv',
-  'target', 'bin', 'obj',
+  'target', 'bin', 'obj', '.rr-site',
 ]);
 
 /**

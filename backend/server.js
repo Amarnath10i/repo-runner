@@ -9,7 +9,7 @@ import { createServer } from 'http';
 import simpleGit from 'simple-git';
 import { v4 as uuid } from 'uuid';
 import { join } from 'path';
-import { mkdirSync, rmSync, existsSync } from 'fs';
+import { mkdirSync, rmSync, existsSync, readdirSync, statSync } from 'fs';
 import { detectRuntime, detectEnvVars, detectEnvVarsFromCode, detectServices, isPromptableSecret } from './detector.js';
 import { startSandbox, stopSandbox, getSession, cleanupAll } from './sandbox.js';
 import {
@@ -46,6 +46,26 @@ const REPOS_DIR = join(process.cwd(), '.repos');
 if (!existsSync(REPOS_DIR)) {
   mkdirSync(REPOS_DIR, { recursive: true });
 }
+
+// Clones left behind by runs that were never stopped (closed tabs, restarts).
+function sweepOldRepos(maxAgeMs = 6 * 60 * 60 * 1000) {
+  for (const name of readdirSync(REPOS_DIR)) {
+    const dir = join(REPOS_DIR, name);
+    try {
+      if (!getNativeSession(name) && Date.now() - statSync(dir).mtimeMs > maxAgeMs) {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    } catch {
+      // in use or already gone
+    }
+  }
+}
+sweepOldRepos(0);
+setInterval(() => sweepOldRepos(), 60 * 60 * 1000).unref();
+
+// One misbehaving request or child process must not take the engine down.
+process.on('uncaughtException', (err) => console.error('[engine] uncaught:', err));
+process.on('unhandledRejection', (err) => console.error('[engine] unhandled rejection:', err));
 
 // Chrome's Private Network Access: lets a page on the public web (e.g. the
 // Vercel-hosted UI) talk to a backend running on the visitor's own machine.
@@ -153,8 +173,15 @@ function broadcast(sessionId, data) {
  * Clone a repo, detect its runtime, and return analysis without running it.
  */
 app.post('/api/analyze', async (req, res) => {
-  const { repoUrl, token } = req.body;
-  if (!repoUrl) return res.status(400).json({ error: 'repoUrl is required' });
+  const { repoUrl: rawUrl, branch, token } = req.body;
+  if (!rawUrl) return res.status(400).json({ error: 'repoUrl is required' });
+
+  // Accept browser-copied URLs: .../tree/<branch>, ?tab=readme, trailing .git or /.
+  const m = rawUrl.trim().replace(/[?#].*$/, '').replace(/\/+$/, '').replace(/\.git$/, '')
+    .match(/^(?:https?:\/\/)?(?:www\.)?github\.com\/([^/\s]+)\/([^/\s]+)(?:\/tree\/([^/\s]+))?/i);
+  if (!m) return res.status(400).json({ error: 'That is not a GitHub repository URL.' });
+  const repoUrl = `https://github.com/${m[1]}/${m[2]}`;
+  const cloneBranch = branch || (m[3] && decodeURIComponent(m[3])) || null;
 
   const sessionId = uuid();
   const repoDir = join(REPOS_DIR, sessionId);
@@ -168,7 +195,7 @@ app.post('/api/analyze', async (req, res) => {
       ? repoUrl.replace('https://', `https://x-access-token:${token}@`)
       : repoUrl;
 
-    await git.clone(cloneUrl, repoDir, ['--depth', '1']);
+    await git.clone(cloneUrl, repoDir, ['--depth', '1', ...(cloneBranch ? ['--branch', cloneBranch] : [])]);
 
     // Detect runtime
     const runtime = detectRuntime(repoDir);
@@ -207,7 +234,14 @@ app.post('/api/analyze', async (req, res) => {
     try {
       rmSync(repoDir, { recursive: true, force: true });
     } catch {}
-    res.status(500).json({ error: err.message });
+    // git's message includes the clone URL — never echo a token back.
+    let message = token ? err.message.split(token).join('***') : err.message;
+    if (/not found|could not read Username|Authentication failed/i.test(message)) {
+      message = `Couldn't clone ${repoUrl} — it doesn't exist, or it's private (add a GitHub token).`;
+    } else if (/Remote branch .* not found/i.test(message)) {
+      message = `Branch "${cloneBranch}" doesn't exist in ${repoUrl}.`;
+    }
+    res.status(500).json({ error: message });
   }
 });
 
@@ -321,7 +355,7 @@ app.post('/api/run-native', async (req, res) => {
       broadcast(sessionId, { type: 'stage', stage: 'ready', message: 'App is running!', previewUrl: url });
       broadcast(sessionId, { type: 'server-ready', url, port });
     };
-    const { hostPort, failed, finished } = isCompound
+    const { hostPort, failed, finished, blocked } = isCompound
       ? await startCompoundNative({ sessionId, repoDir, services, envVars: envVars || {}, onOutput })
       : await startNativeProcess({
           sessionId,
@@ -338,9 +372,11 @@ app.post('/api/run-native', async (req, res) => {
       if (failed) {
         broadcast(sessionId, {
           type: 'error',
-          message: 'The app exited before opening a web server — check the terminal output for the error.',
+          message: blocked
+            ? "Windows blocked a program this repo needs (Smart App Control). This PC's security setting stops unsigned programs, including some compiled Python packages, from running."
+            : 'The app exited before opening a web server — check the terminal output for the error.',
         });
-        res.status(200).json({ ok: false, previewUrl: null, port: null, mode: 'native-failed' });
+        res.status(200).json({ ok: false, previewUrl: null, port: null, mode: 'native-failed', blocked: !!blocked });
         return;
       }
       broadcast(sessionId, {

@@ -9,7 +9,7 @@ import {
   writeFileSync, existsSync, copyFileSync, readdirSync, readFileSync, statSync, renameSync, createReadStream, rmSync,
 } from 'fs';
 import { createConnection } from 'net';
-import { ensureTool, canProvision } from './auto-provision.js';
+import { ensureTool, canProvision, ensureDotnetSdk } from './auto-provision.js';
 
 // Track active native sessions
 const nativeSessions = new Map();
@@ -30,8 +30,6 @@ const RESERVED_PORTS = new Set([Number(process.env.PORT) || 3001, 5173]);
 // programs from the current folder by bare name, so always give a path.
 const local = (file) => (IS_WIN ? `.\\${file}` : `./${file}`);
 
-const VENV_PYTHON = IS_WIN ? join('.venv', 'Scripts', 'python.exe') : join('.venv', 'bin', 'python');
-const venvBin = (name) => (IS_WIN ? join('.venv', 'Scripts', `${name}.exe`) : join('.venv', 'bin', name));
 
 function getAvailablePort() {
   for (let p = PORT_RANGE_START; p < PORT_RANGE_END; p++) {
@@ -104,7 +102,7 @@ const RUNTIME_TOOLS = {
   'java': [['java', 'javac']],
   'deno': [['deno', 'deno']],
   'cpp': [['cpp', 'g++']],
-  'dotnet': [[null, 'dotnet']],
+  'dotnet': [], // SDK handled in prepareToolchain (installed per channel)
   'node': [[null, 'node']],
   'static': [],
 };
@@ -180,6 +178,21 @@ function readGradleWrapperVersion(cwd) {
   return m ? Number(m[1]) * 100 + Number(m[2]) : 9999; // 8.5 → 805
 }
 
+/**
+ * .NET: the project needs an SDK at least as new as its TargetFramework
+ * (older targets build on .NET 8 and run with roll-forward). A machine may
+ * have only the runtime, or an older SDK — install one when so.
+ */
+async function prepareDotnet({ runtime, cwd, processEnv, onOutput }) {
+  const proj = readFileSafe(join(cwd, runtime.project || '')) || '';
+  const tfm = proj.match(/<TargetFrameworks?>\s*net(\d+)\.\d/i);
+  const need = Math.max(8, tfm ? Number(tfm[1]) : 8);
+  const listed = await captureOutput('dotnet', ['--list-sdks'], { cwd, env: processEnv });
+  const majors = (listed.stdout.match(/^\d+/gm) || []).map(Number);
+  if (majors.some((m) => m >= need)) return;
+  applyToolEnv(processEnv, await ensureDotnetSdk(`${need}.0`, onOutput));
+}
+
 /** Is `command` on the PATH of `env` (which may include provisioned tools)? */
 function onPath(command, env) {
   const key = Object.keys(env).find((k) => k.toUpperCase() === 'PATH');
@@ -206,6 +219,7 @@ async function prepareToolchain({ runtime, cwd, processEnv, onOutput }) {
     }
     applyToolEnv(processEnv, await ensureTool(tool, onOutput));
   }
+  if (runtime.id === 'dotnet') await prepareDotnet({ runtime, cwd, processEnv, onOutput });
   // Composer comes bundled with the PHP we provision; use that PHP if the
   // system one has no Composer.
   if (runtime.id === 'php' && existsSync(join(cwd, 'composer.json')) && !isCommandAvailable('composer') && canProvision('php')) {
@@ -471,14 +485,55 @@ function pickPythonVersion(cwd) {
   return version;
 }
 
+/** Run a command and collect its stdout (for tools whose output we parse). */
+function captureOutput(cmd, args, opts) {
+  return new Promise((resolve) => {
+    let stdout = '';
+    const proc = spawn(q(cmd), args.map(q), { ...opts, stdio: ['ignore', 'pipe', 'ignore'], shell: true });
+    proc.stdout.on('data', (d) => { stdout += d; });
+    proc.on('error', () => resolve({ code: -1, stdout }));
+    proc.on('exit', (code) => resolve({ code, stdout }));
+  });
+}
+
+// A project's packages go here (uv pip install --target) and are put on
+// PYTHONPATH. No per-project venv: its copied python.exe/uvicorn.exe
+// launchers are unsigned, and Windows Smart App Control blocks them, while
+// the base interpreter runs fine. Tools are started with `python -m …`.
+const PY_SITE = '.rr-site';
+
+// Two runs installing the same Python at once trip over uv's install lock, so
+// interpreter setup is serialized.
+let pythonSetupQueue = Promise.resolve();
+
+function resolvePython(version, opts, onOutput) {
+  const job = pythonSetupQueue.then(async () => {
+    await spawnWithOutput('uv', ['python', 'install', version], opts, onOutput);
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const found = await captureOutput('uv', ['python', 'find', '--no-project', version], opts);
+      const python = found.stdout.trim().split(/\r?\n/).pop();
+      if (found.code === 0 && python) return python;
+      await new Promise((r) => setTimeout(r, 1500));
+    }
+    throw Object.assign(new Error(`Couldn't get a Python ${version} interpreter.`), { fatal: true });
+  });
+  pythonSetupQueue = job.catch(() => {});
+  return job;
+}
+
 async function installPython({ runtime, cwd, processEnv, onOutput }) {
   const opts = { cwd, env: processEnv };
-  if (!existsSync(join(cwd, '.venv'))) {
-    const version = pickPythonVersion(cwd);
-    onOutput(`\n[setup] Creating a Python ${version} environment (uv downloads Python if needed)...\n`);
-    await mustRun('uv', ['venv', '.venv', '--python', version, '--seed'], opts, onOutput, 'Creating the Python environment');
-  }
-  const pip = async (args) => (await spawnWithOutput('uv', ['pip', 'install', '--python', VENV_PYTHON, ...args], opts, onOutput)).code === 0;
+  const version = pickPythonVersion(cwd);
+  onOutput(`\n[setup] Getting Python ${version} (uv downloads it if needed)...\n`);
+  const python = await resolvePython(version, opts, onOutput);
+  onOutput(`Using ${python}\n`);
+
+  const site = join(cwd, PY_SITE);
+  const pathKey = Object.keys(processEnv).find((k) => k.toUpperCase() === 'PYTHONPATH') || 'PYTHONPATH';
+  processEnv[pathKey] = [cwd, site, processEnv[pathKey]].filter(Boolean).join(delimiter);
+  processEnv.PYTHONNOUSERSITE = '1';
+
+  const pip = async (args) => (await spawnWithOutput('uv', ['pip', 'install', '--python', python, '--target', PY_SITE, ...args], opts, onOutput)).code === 0;
 
   // Install a package list; if resolution fails as a whole, go one by one so
   // a single bad/unavailable package doesn't block everything else.
@@ -523,14 +578,14 @@ async function installPython({ runtime, cwd, processEnv, onOutput }) {
   if (runtime.id === 'python-django') {
     const manage = runtime.manage || 'manage.py';
     onOutput('\n[setup] Applying Django migrations...\n');
-    await spawnWithOutput(VENV_PYTHON, [manage, 'migrate', '--noinput'], opts, onOutput);
+    await spawnWithOutput(python, [manage, 'migrate', '--noinput'], opts, onOutput);
     // Manifest static storage (e.g. WhiteNoise) 500s until static files are collected.
     const settings = collectSources(cwd, new Set(['.py'])).filter((f) => /settings/.test(f));
     if (settings.some((f) => /STATIC_ROOT/.test(readFileSafe(join(cwd, f)) || ''))) {
-      await spawnWithOutput(VENV_PYTHON, [manage, 'collectstatic', '--noinput'], opts, onOutput);
+      await spawnWithOutput(python, [manage, 'collectstatic', '--noinput'], opts, onOutput);
     }
   }
-  return {};
+  return { python };
 }
 
 /** Requirement lines reduced to bare package names (drops ==/>= pins). */
@@ -935,6 +990,8 @@ async function buildCpp({ cwd, opts, onOutput }) {
  */
 function buildStartCommand({ runtime, hostPort, processEnv, cwd, prepared = {} }) {
   const port = String(hostPort);
+  // The interpreter installPython resolved (packages are on PYTHONPATH).
+  const PY = prepared.python || (IS_WIN ? 'python' : 'python3');
   switch (runtime.id) {
     case 'python-flask': {
       processEnv.FLASK_RUN_PORT = port;
@@ -944,24 +1001,24 @@ function buildStartCommand({ runtime, hostPort, processEnv, cwd, prepared = {} }
       // as a script — serve it through `flask run` instead.
       const src = readFileSafe(join(cwd, appFile)) || '';
       if (!/\.run\(|__main__/.test(src)) {
-        return { startCmd: VENV_PYTHON, startArgs: ['-m', 'flask', '--app', appFile.replace(/\.py$/, '').replace(/[\\/]/g, '.'), 'run', '--host', '0.0.0.0', '--port', port] };
+        return { startCmd: PY, startArgs: ['-m', 'flask', '--app', appFile.replace(/\.py$/, '').replace(/[\\/]/g, '.'), 'run', '--host', '0.0.0.0', '--port', port] };
       }
-      return { startCmd: VENV_PYTHON, startArgs: [appFile] };
+      return { startCmd: PY, startArgs: [appFile] };
     }
     case 'python-fastapi': {
       const modulePart = runtime.start?.match(/uvicorn\s+(\S+)/)?.[1] || 'main:app';
-      return { startCmd: venvBin('uvicorn'), startArgs: [modulePart, '--host', '0.0.0.0', '--port', port] };
+      return { startCmd: PY, startArgs: ['-m', 'uvicorn', modulePart, '--host', '0.0.0.0', '--port', port] };
     }
     case 'python-django':
-      return { startCmd: VENV_PYTHON, startArgs: [runtime.manage || 'manage.py', 'runserver', `0.0.0.0:${port}`] };
+      return { startCmd: PY, startArgs: [runtime.manage || 'manage.py', 'runserver', `0.0.0.0:${port}`] };
     case 'python-streamlit': {
       const appFile = runtime.start?.match(/streamlit\s+run\s+(\S+)/)?.[1] || 'app.py';
-      return { startCmd: venvBin('streamlit'), startArgs: ['run', appFile, '--server.port', port, '--server.headless', 'true', '--server.address', '0.0.0.0'] };
+      return { startCmd: PY, startArgs: ['-m', 'streamlit', 'run', appFile, '--server.port', port, '--server.headless', 'true', '--server.address', '0.0.0.0'] };
     }
     case 'python-gradio': {
       processEnv.GRADIO_SERVER_PORT = port;
       processEnv.GRADIO_SERVER_NAME = '0.0.0.0';
-      return { startCmd: VENV_PYTHON, startArgs: [runtime.start?.split(' ').pop() || 'app.py'] };
+      return { startCmd: PY, startArgs: [runtime.start?.split(' ').pop() || 'app.py'] };
     }
     case 'python-notebook': {
       // Config file (not CLI flags) so no quoting is needed for the iframe CSP.
@@ -976,10 +1033,10 @@ function buildStartCommand({ runtime, hostPort, processEnv, cwd, prepared = {} }
         'c.ServerApp.disable_check_xsrf = True',
         "c.ServerApp.tornado_settings = {'headers': {'Content-Security-Policy': 'frame-ancestors *'}}",
       ].join('\n'));
-      return { startCmd: VENV_PYTHON, startArgs: ['-m', 'jupyter', 'lab', '--config=.rr-jupyter-config.py'] };
+      return { startCmd: PY, startArgs: ['-m', 'jupyterlab', '--config=.rr-jupyter-config.py'] };
     }
     case 'python':
-      return { startCmd: VENV_PYTHON, startArgs: [runtime.start?.split(' ').pop() || 'main.py'] };
+      return { startCmd: PY, startArgs: [runtime.start?.split(' ').pop() || 'main.py'] };
 
     case 'node': {
       processEnv.BROWSER = 'none'; // create-react-app would open a browser tab
@@ -1071,7 +1128,7 @@ const API_URL_ENV_KEYS = [
   'API_URL', 'API_BASE_URL', 'BACKEND_URL', 'PUBLIC_API_URL',
 ];
 
-const SOURCE_SKIP_DIRS = new Set(['.git', 'build', 'bin', 'obj', 'node_modules', '.vscode', 'cmake-build-debug', '.venv', 'venv', 'build-rr', 'target']);
+const SOURCE_SKIP_DIRS = new Set(['.git', 'build', 'bin', 'obj', 'node_modules', '.vscode', 'cmake-build-debug', '.venv', 'venv', 'build-rr', 'target', '.rr-site']);
 
 /** Recursively collect source files with the given extensions under `dir`. */
 function collectSources(dir, exts, base = dir, out = []) {
@@ -1241,6 +1298,7 @@ export async function startNativeProcess({ sessionId, repoDir, runtime, envVars,
     try {
       prepared = (await installDeps({ runtime, cwd, processEnv, onOutput })) || {};
     } catch (err) {
+      if (err.fatal) throw err;
       onOutput(`\n[warning] ${err.message}\n`);
       // Interpreted stacks may still start; compiled ones fail in buildStartCommand.
     }
@@ -1292,7 +1350,7 @@ export async function startNativeProcess({ sessionId, repoDir, runtime, envVars,
           'That is a security setting on this PC; the same repo runs on machines without it or on the Linux backend.\n');
       }
       onOutput(`\n[error] The app exited with code ${exitInfo.code} before opening a web server (see the logs above).\n`);
-      return { hostPort: null, failed: true };
+      return { hostPort: null, failed: true, blocked: policyBlocked || [4551, 3236495362].includes(exitInfo.code) };
     }
     onOutput('\n[info] Still running, no web server detected yet — showing console output. The preview opens automatically if it starts listening.\n');
     watchForLatePort({ sessionId, session, hostPort, observer, exitInfo, onOutput, onReady });
