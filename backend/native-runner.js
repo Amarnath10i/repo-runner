@@ -1253,7 +1253,7 @@ export async function startNativeProcess({ sessionId, repoDir, runtime, envVars,
       startCmd, startArgs, cwd, processEnv,
       onOutput: (t) => {
         observer.scan(t);
-        if (/Application Control policy has blocked/i.test(t)) policyBlocked = true;
+        if (/Application Control policy has blocked|Device Guard policy/i.test(t)) policyBlocked = true;
         onOutput(t);
       },
     });
@@ -1287,7 +1287,7 @@ export async function startNativeProcess({ sessionId, repoDir, runtime, envVars,
       return { hostPort: null, finished: true };
     }
     if (exitInfo.code !== undefined) {
-      if (policyBlocked || exitInfo.code === 3236495362) {
+      if (policyBlocked || exitInfo.code === 3236495362 || exitInfo.code === 4551) {
         onOutput('\n[error] Windows blocked a program this project built (Smart App Control / Application Control policy). ' +
           'That is a security setting on this PC; the same repo runs on machines without it or on the Linux backend.\n');
       }

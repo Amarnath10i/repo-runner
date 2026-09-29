@@ -278,6 +278,8 @@ export default function App() {
   }
 
   function fail(message, kind = null) {
+    setInputTarget(null);
+    setAwaitingInput(false);
     setErrorMsg(message);
     setErrorKind(kind);
     setStage(STAGES.ERROR);
@@ -696,189 +698,189 @@ export default function App() {
       </header>
 
       <main className={`hero ${stage === STAGES.IDLE ? '' : 'hidden'}`}>
-          <div className="hero-content">
-            <div className="hero-brand">
-              <GithubIcon size={84} className="hero-icon" />
-              <div className="brand-text hero-size">
-                <span className="brand-git">
-                  <span className="brand-g">G</span>
-                  <span className="brand-it">IT</span>
-                </span>
-                <span className="brand-live">Live</span>
+        <div className="hero-content">
+          <div className="hero-brand">
+            <GithubIcon size={84} className="hero-icon" />
+            <div className="brand-text hero-size">
+              <span className="brand-git">
+                <span className="brand-g">G</span>
+                <span className="brand-it">IT</span>
+              </span>
+              <span className="brand-live">Live</span>
+            </div>
+          </div>
+          <p className="hero-sub">Paste a GitHub repo — get a running app. No setup.</p>
+
+          <form onSubmit={handleFetchRepo} className="hero-form">
+            <div className="hero-input-group">
+              <input
+                id="repo-url"
+                type="text"
+                inputMode="url"
+                autoComplete="off"
+                spellCheck="false"
+                placeholder="github.com/owner/repo"
+                value={repoUrl}
+                onChange={(e) => setRepoUrl(e.target.value)}
+                required
+                className="hero-input"
+              />
+              <button className="btn-go" type="submit" disabled={!repoUrl.trim()}>
+                Go Live <ArrowIcon />
+              </button>
+            </div>
+          </form>
+
+          <div className="examples">
+            <span className="examples-label">Try</span>
+            {EXAMPLES.map((ex) => (
+              <button key={ex.url} type="button" className="example-chip" onClick={() => setRepoUrl(ex.url)}>
+                {ex.label}
+              </button>
+            ))}
+          </div>
+
+          <div className="stack-groups">
+            <div className="stack-group">
+              <span className="stack-title">Runs in your browser</span>
+              <div className="stack-list">
+                {IN_BROWSER_STACKS.map((s) => <span key={s} className="stack-pill">{s}</span>)}
               </div>
             </div>
-            <p className="hero-sub">Paste a GitHub repo — get a running app. No setup.</p>
-
-            <form onSubmit={handleFetchRepo} className="hero-form">
-              <div className="hero-input-group">
-                <input
-                  id="repo-url"
-                  type="text"
-                  inputMode="url"
-                  autoComplete="off"
-                  spellCheck="false"
-                  placeholder="github.com/owner/repo"
-                  value={repoUrl}
-                  onChange={(e) => setRepoUrl(e.target.value)}
-                  required
-                  className="hero-input"
-                />
-                <button className="btn-go" type="submit" disabled={!repoUrl.trim()}>
-                  Go Live <ArrowIcon />
-                </button>
-              </div>
-            </form>
-
-            <div className="examples">
-              <span className="examples-label">Try</span>
-              {EXAMPLES.map((ex) => (
-                <button key={ex.url} type="button" className="example-chip" onClick={() => setRepoUrl(ex.url)}>
-                  {ex.label}
-                </button>
-              ))}
-            </div>
-
-            <div className="stack-groups">
-              <div className="stack-group">
-                <span className="stack-title">Runs in your browser</span>
-                <div className="stack-list">
-                  {IN_BROWSER_STACKS.map((s) => <span key={s} className="stack-pill">{s}</span>)}
-                </div>
-              </div>
-              <div className={`stack-group ${serverOnline ? '' : 'dim'}`}>
-                <span className="stack-title">
-                  With the runner engine {serverOnline ? <em className="ok">· connected</em> : <em>· not connected</em>}
-                </span>
-                <div className="stack-list">
-                  {ENGINE_STACKS.map((s) => <span key={s} className="stack-pill">{s}</span>)}
-                </div>
+            <div className={`stack-group ${serverOnline ? '' : 'dim'}`}>
+              <span className="stack-title">
+                With the runner engine {serverOnline ? <em className="ok">· connected</em> : <em>· not connected</em>}
+              </span>
+              <div className="stack-list">
+                {ENGINE_STACKS.map((s) => <span key={s} className="stack-pill">{s}</span>)}
               </div>
             </div>
           </div>
+        </div>
       </main>
 
       <main className={`workspace ${stage === STAGES.IDLE ? 'hidden' : ''}`}>
-          <section className="stage-area">
-            {previewUrl ? (
-              <div className="browser">
-                <div className="browser-bar">
-                  <span className="browser-dots"><i /><i /><i /></span>
-                  <button className="icon-btn" type="button" title="Reload" onClick={() => setPreviewKey((k) => k + 1)}>
-                    <ReloadIcon />
-                  </button>
-                  <div className="address">
-                    <LockIcon />
-                    <span>{displayUrl(previewUrl, repoName)}</span>
-                  </div>
-                  {!previewUrl.startsWith('blob:') && (
-                    <a className="icon-btn" href={previewUrl} target="_blank" rel="noreferrer" title="Open in a new tab">
-                      <ExternalIcon />
-                    </a>
-                  )}
+        <section className="stage-area">
+          {previewUrl ? (
+            <div className="browser">
+              <div className="browser-bar">
+                <span className="browser-dots"><i /><i /><i /></span>
+                <button className="icon-btn" type="button" title="Reload" onClick={() => setPreviewKey((k) => k + 1)}>
+                  <ReloadIcon />
+                </button>
+                <div className="address">
+                  <LockIcon />
+                  <span>{displayUrl(previewUrl, repoName)}</span>
                 </div>
-                <iframe
-                  key={`${previewUrl}#${previewKey}`}
-                  title="Preview"
-                  src={previewUrl}
-                  className="preview-frame"
-                  {...(executionMode === 'native' || executionMode === 'docker' ? { credentialless: '' } : {})}
-                  allow="accelerometer; camera; encrypted-media; geolocation; gyroscope; microphone; clipboard-read; clipboard-write; cross-origin-isolated"
-                />
-              </div>
-            ) : stage === STAGES.ERROR ? (
-              <ErrorPanel
-                message={errorMsg}
-                kind={errorKind}
-                onRetry={() => handleFetchRepo()}
-                onConnect={async () => {
-                  connectLocalEngine();
-                  const status = await refreshBackendStatus(0);
-                  if (status.serverOnline) handleFetchRepo();
-                  else writeLog('\n\x1b[33mNo engine answered at http://localhost:3001 — is it running?\x1b[0m\n');
-                }}
-                onBack={handleStop}
-              />
-            ) : isConsole ? (
-              <ConsolePanel
-                done={programDone}
-                figures={figures}
-                inputEnabled={inputEnabled}
-                awaitingInput={awaitingInput}
-                onFocusTerminal={() => {
-                  setIsTerminalOpen(true);
-                  termInstance.current?.focus();
-                }}
-              />
-            ) : (
-              <LaunchPanel
-                repoName={repoName}
-                currentStep={currentStep}
-                progress={progress}
-                activity={activity}
-                elapsed={elapsed}
-                paused={stage === STAGES.NEEDS_ENV}
-              />
-            )}
-
-            {stage === STAGES.NEEDS_ENV && (
-              <div className="modal-overlay">
-                <form
-                  className="modal"
-                  onSubmit={(e) => {
-                    e.preventDefault();
-                    handleRunWithEnv();
-                  }}
-                >
-                  <h3>This app needs a few secrets</h3>
-                  <p className="modal-hint">They're only sent to where the app runs. Leave blank to skip.</p>
-                  {detectedKeys.map((key) => (
-                    <label className="env-row" key={key}>
-                      <span>{key}</span>
-                      <input
-                        type="password"
-                        value={envValues[key] || ''}
-                        onChange={(e) => setEnvValues((prev) => ({ ...prev, [key]: e.target.value }))}
-                        placeholder="value"
-                      />
-                    </label>
-                  ))}
-                  <button className="btn-go small" type="submit">Continue <ArrowIcon /></button>
-                </form>
-              </div>
-            )}
-          </section>
-
-          <section className={`terminal-panel ${isTerminalOpen ? 'open' : 'closed'}`}>
-            <div className="terminal-header" onClick={() => setIsTerminalOpen(!isTerminalOpen)}>
-              <div className="terminal-title">
-                <TerminalIcon /> Terminal
-                {inputEnabled && (
-                  <span className={`input-hint ${awaitingInput ? 'waiting' : ''}`}>
-                    {awaitingInput ? 'waiting for input — type and press Enter' : 'input enabled'}
-                  </span>
+                {!previewUrl.startsWith('blob:') && (
+                  <a className="icon-btn" href={previewUrl} target="_blank" rel="noreferrer" title="Open in a new tab">
+                    <ExternalIcon />
+                  </a>
                 )}
               </div>
-              <div className="terminal-actions">
-                <button
-                  className="icon-btn"
-                  type="button"
-                  title="Clear"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    termInstance.current?.clear();
-                  }}
-                >
-                  <ClearIcon />
-                </button>
-                <button className="icon-btn" type="button" title={isTerminalOpen ? 'Collapse' : 'Expand'}>
-                  <ChevronIcon up={!isTerminalOpen} />
-                </button>
-              </div>
+              <iframe
+                key={`${previewUrl}#${previewKey}`}
+                title="Preview"
+                src={previewUrl}
+                className="preview-frame"
+                {...(executionMode === 'native' || executionMode === 'docker' ? { credentialless: '' } : {})}
+                allow="accelerometer; camera; encrypted-media; geolocation; gyroscope; microphone; clipboard-read; clipboard-write; cross-origin-isolated"
+              />
             </div>
-            <div className="terminal-body" onClick={() => termInstance.current?.focus()}>
-              <div className="terminal-wrap" ref={termRef} />
+          ) : stage === STAGES.ERROR ? (
+            <ErrorPanel
+              message={errorMsg}
+              kind={errorKind}
+              onRetry={() => handleFetchRepo()}
+              onConnect={async () => {
+                connectLocalEngine();
+                const status = await refreshBackendStatus(0);
+                if (status.serverOnline) handleFetchRepo();
+                else writeLog('\n\x1b[33mNo engine answered at http://localhost:3001 — is it running?\x1b[0m\n');
+              }}
+              onBack={handleStop}
+            />
+          ) : isConsole ? (
+            <ConsolePanel
+              done={programDone}
+              figures={figures}
+              inputEnabled={inputEnabled}
+              awaitingInput={awaitingInput}
+              onFocusTerminal={() => {
+                setIsTerminalOpen(true);
+                termInstance.current?.focus();
+              }}
+            />
+          ) : (
+            <LaunchPanel
+              repoName={repoName}
+              currentStep={currentStep}
+              progress={progress}
+              activity={activity}
+              elapsed={elapsed}
+              paused={stage === STAGES.NEEDS_ENV}
+            />
+          )}
+
+          {stage === STAGES.NEEDS_ENV && (
+            <div className="modal-overlay">
+              <form
+                className="modal"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  handleRunWithEnv();
+                }}
+              >
+                <h3>This app needs a few secrets</h3>
+                <p className="modal-hint">They're only sent to where the app runs. Leave blank to skip.</p>
+                {detectedKeys.map((key) => (
+                  <label className="env-row" key={key}>
+                    <span>{key}</span>
+                    <input
+                      type="password"
+                      value={envValues[key] || ''}
+                      onChange={(e) => setEnvValues((prev) => ({ ...prev, [key]: e.target.value }))}
+                      placeholder="value"
+                    />
+                  </label>
+                ))}
+                <button className="btn-go small" type="submit">Continue <ArrowIcon /></button>
+              </form>
             </div>
-          </section>
+          )}
+        </section>
+
+        <section className={`terminal-panel ${isTerminalOpen ? 'open' : 'closed'}`}>
+          <div className="terminal-header" onClick={() => setIsTerminalOpen(!isTerminalOpen)}>
+            <div className="terminal-title">
+              <TerminalIcon /> Terminal
+              {inputEnabled && (
+                <span className={`input-hint ${awaitingInput ? 'waiting' : ''}`}>
+                  {awaitingInput ? 'waiting for input — type and press Enter' : 'input enabled'}
+                </span>
+              )}
+            </div>
+            <div className="terminal-actions">
+              <button
+                className="icon-btn"
+                type="button"
+                title="Clear"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  termInstance.current?.clear();
+                }}
+              >
+                <ClearIcon />
+              </button>
+              <button className="icon-btn" type="button" title={isTerminalOpen ? 'Collapse' : 'Expand'}>
+                <ChevronIcon up={!isTerminalOpen} />
+              </button>
+            </div>
+          </div>
+          <div className="terminal-body" onClick={() => termInstance.current?.focus()}>
+            <div className="terminal-wrap" ref={termRef} />
+          </div>
+        </section>
       </main>
 
       {stage === STAGES.IDLE && (
