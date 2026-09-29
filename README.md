@@ -5,58 +5,66 @@
 **Paste a GitHub URL → get a live demo.** Repo Runner detects a repo's stack,
 installs its dependencies, runs it, and shows a live preview — automatically.
 
-### Deployed on
-- **Frontend**: [Vercel](https://github-runner-kappa.vercel.app)
-- **Backend**: [Railway](https://repo-runner-production.up.railway.app)
+## Where repos run
 
-## About
-
-A zero-config runner for GitHub repos. It picks one of two paths on its own:
-
-- **In-browser** (WebContainers) for pure Node.js/Vite/React/Express apps.
-- **Local backend** (native, no Docker needed) for everything else — it clones
-  with `git` and runs the app on your machine.
-
-Just paste a URL and click **Fetch & Run**.
-
-## Runs non-Node stacks too
+Many repos run **entirely in your browser**, with no server at all:
 
 | Stack | How |
 |---|---|
-| Node / Vite / React / Express | In-browser |
-| Next.js · Bun | Native |
-| Python — Flask / FastAPI / Django | Native |
-| Python — **Streamlit / Gradio** (ML demos) | Native |
-| Static sites (HTML/CSS/JS) | Served over HTTP |
-| C / C++ | Compiled & run |
+| Node / Vite / React / Express | WebContainers (in-browser Node) |
+| Static sites (HTML/CSS/JS) | Served from an in-browser web server |
+| Python scripts | Pyodide (Python in WebAssembly) — `input()` works in the terminal |
+| Jupyter notebooks | Run top to bottom in Pyodide; matplotlib figures are shown |
+| Streamlit | stlite (Streamlit on Pyodide) |
+| Anything else | A browsable file listing with the README |
+
+Everything else runs on the **runner engine** (`backend/`), which installs each
+language on first use — no manual setup:
+
+| Stack | Engine |
+|---|---|
+| Python — Flask / FastAPI / Django / Gradio / Streamlit, any package | uv-managed Python |
+| Java — Maven / Gradle / Spring Boot / Quarkus / plain `.java` | Temurin JDK 11 / 17 / 21 |
+| Go · Rust · Ruby (Rails, Sinatra) · PHP (Laravel, Composer) · Bun · Deno | Portable toolchains |
+| C / C++ — CMake, Makefile or loose sources | MinGW-w64 (Windows) / system GCC |
+| .NET · Next.js · Node with native addons | Installed runtime |
 | Monorepos (frontend + backend) | Both, wired together |
-| Docker / compose | Via Docker Desktop |
+| Docker / compose | Docker Desktop, or the app inside it natively |
 
-Also: token auto-loaded from `.env`, required env vars detected from code,
-ports auto-detected, misspelled `requirements.txt` tolerated, Ollama used
-automatically when running.
+With the engine connected, Python repos use it too (full CPython, any package).
+Console programs stream to the terminal, and you can type into it to answer prompts.
 
-## Limits
-
-- No GPU; Docker-only repos need Docker running; uninstalled runtimes (Go, Ruby,
-  PHP, Java, C/C++ compiler) must be installed — it tells you which.
-- Console/ML scripts run to the terminal but have no web preview.
-- ⚠️ The backend runs repo code **natively, not sandboxed** — only run repos you
-  trust.
-
-## Run it
+## Run it locally
 
 ```bash
-# optional: cp .env.example .env  and add VITE_GITHUB_TOKEN=...
 npm install
 npm run dev
 ```
 
-Open `http://localhost:5173` in Chrome/Edge (backend auto-starts on 3001).
+Open `http://localhost:5173` in Chrome or Edge. The engine auto-starts on port 3001.
+Optionally copy `.env.example` to `.env` and add `VITE_GITHUB_TOKEN` for private repos.
+
+Runtimes the engine downloads are kept in `backend/.runtimes` (on Windows, when
+that path contains spaces, in `%LOCALAPPDATA%\repo-runner\runtimes`; set
+`REPO_RUNNER_RUNTIMES` to choose another folder).
+
+## Limits
+
+- No GPU. Desktop GUI programs (tkinter, pygame, Qt) need a real display.
+- In the browser, Python packages must have Pyodide builds or pure-Python wheels
+  (numpy, pandas, matplotlib, scikit-learn and most pure packages work; PyTorch doesn't).
+- On Windows with Smart App Control on, Windows may block programs the engine
+  compiles (C/C++, Rust); the terminal says so when it happens.
+- ⚠️ The engine runs repo code **natively, not sandboxed** — only run repos you trust.
 
 ## Structure
 
 ```
-src/          frontend — App.jsx, lib/{github,heuristics,ollama,runner,backend-runner}.js
-backend/      server.js, detector.js, native-runner.js, sandbox.js, auto-provision.js
+src/          UI — App.jsx; lib/: github (fetch), heuristics + browser-plan (routing),
+              runner + static-runner (WebContainers), python-runner + python.worker (Pyodide),
+              backend-runner (engine client)
+backend/      server.js, detector.js, native-runner.js, auto-provision.js,
+              preview-proxy.js, sandbox.js (Docker), Dockerfile
 ```
+
+See [DEPLOY.md](DEPLOY.md) to deploy the UI and the engine.

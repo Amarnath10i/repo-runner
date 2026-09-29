@@ -1,38 +1,52 @@
 # Deploying Repo Runner
 
-⚠️ **Read this first.** The "run any repo" backend is designed to run **locally**.
-In the cloud it can only reliably do **analyze/detect** and let **Node repos run
-in-browser (WebContainers)**. The native "run Python/Go/etc." path needs dynamic
-ports and runs untrusted code, which a shared cloud host can't safely expose. So:
+There are two parts:
 
-- **Vercel (frontend)** → fully works for the in-browser (Node) path. Recommended.
-- **Railway (backend)** → optional; gives analyze/detect only.
+- **The UI** (Vite app at the repo root) — deploy it to Vercel. On its own it runs
+  Node, static sites, Python scripts, notebooks and Streamlit in the visitor's browser.
+- **The runner engine** (`backend/`) — optional. Deploy it to run everything else
+  (Java, Go, Rust, C/C++, PHP, Ruby, .NET, Python web apps…).
 
-## Frontend → Vercel
+⚠️ The engine executes arbitrary repo code. Only expose one you're prepared to
+have anyone run code on; keep it private (or behind your own auth) otherwise.
 
-1. Push this repo to GitHub (done: `Amarnath10i/repo-runner`).
-2. In the Vercel dashboard: **New Project → Import** this repo.
-3. Framework preset: **Vite**. Build/output are already set in `vercel.json`
-   (`vite build` → `dist`) along with the required COOP/COEP headers.
-4. Env vars (Project → Settings → Environment Variables):
-   - `VITE_GITHUB_TOKEN` = your GitHub token (optional; raises API limits)
-   - `VITE_BACKEND_URL` = your Railway backend URL (only if you deploy the backend)
-5. Deploy.
+## UI → Vercel
 
-CLI alternative:
+1. Vercel dashboard → **New Project → Import** this repo.
+2. Framework preset: **Vite**. `vercel.json` already sets the build and the
+   COOP/COEP headers the in-browser runtimes need.
+3. Environment variables (optional):
+   - `VITE_BACKEND_URL` — your deployed engine's URL (see below).
+   - `VITE_GITHUB_TOKEN` — only for private use; it's bundled into the page.
+4. Deploy.
+
+Without `VITE_BACKEND_URL`, visitors can still connect an engine running on
+their own machine: when a repo needs one, the page shows the command to start it
+and a **Connect local engine** button. The page never contacts the visitor's
+localhost before they click it (browsers ask permission for that).
+
+## Engine → Railway / Render / Fly
+
+`backend/Dockerfile` builds an image with Python, PHP + Composer, Ruby, GCC and
+CMake preinstalled; Go, Java, Rust, Bun and Deno are downloaded on first use.
+
+**Railway:** New Project → Deploy from GitHub repo → set **Root Directory** to
+`backend` (the Dockerfile is picked up automatically) → generate a public domain.
+Railway injects `PORT`; the server listens on it.
+
+**Render / Fly:** point a Docker service at `backend/Dockerfile`.
+
+Then set `VITE_BACKEND_URL` on Vercel to the engine's public URL and redeploy.
+
+Previews from a deployed engine are served under
+`https://<engine>/preview/<session>/` on the same port. Mount a volume at
+`/app/.runtimes` to keep downloaded toolchains between deploys.
+
+## Local engine
+
 ```bash
-npm i -g vercel
-vercel        # first run links the project
-vercel --prod
+git clone https://github.com/Amarnath10i/repo-runner
+cd repo-runner/backend && npm install && npm start
 ```
 
-## Backend → Railway (optional)
-
-1. Railway dashboard → **New Project → Deploy from GitHub repo** → this repo.
-2. Set **Root Directory** to `backend`.
-3. Start command is `npm start` (already in `backend/package.json`).
-4. Railway injects `PORT`; the server already binds `process.env.PORT`.
-5. Copy the public URL and set it as `VITE_BACKEND_URL` on Vercel.
-
-Note: Railway's Node image has Node only — Python/other runtimes and Docker
-aren't available, so only Node analyze and in-browser runs work there.
+Each preview gets its own port on `localhost`.
