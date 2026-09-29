@@ -571,11 +571,12 @@ async function installPython({ runtime, cwd, processEnv, onOutput }) {
   const python = await resolvePython(version, opts, onOutput);
   onOutput(`Using ${python}\n`);
 
-  const site = join(cwd, PY_SITE);
+  // Absolute: the app may run from another folder (a package's parent).
+  const site = resolve(cwd, PY_SITE);
   const pathKey = Object.keys(processEnv).find((k) => k.toUpperCase() === 'PYTHONPATH') || 'PYTHONPATH';
   // src/ layouts import their packages by name from there.
-  const srcDir = existsSync(join(cwd, 'src')) && !existsSync(join(cwd, 'src', '__init__.py')) ? join(cwd, 'src') : null;
-  processEnv[pathKey] = [cwd, srcDir, site, processEnv[pathKey]].filter(Boolean).join(delimiter);
+  const srcDir = existsSync(join(cwd, 'src')) && !existsSync(join(cwd, 'src', '__init__.py')) ? resolve(cwd, 'src') : null;
+  processEnv[pathKey] = [resolve(cwd), srcDir, site, processEnv[pathKey]].filter(Boolean).join(delimiter);
   processEnv.PYTHONNOUSERSITE = '1';
 
   const pip = async (args) => (await spawnWithOutput('uv', ['pip', 'install', '--python', python, '--target', PY_SITE, ...args], opts, onOutput)).code === 0;
