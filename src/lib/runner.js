@@ -94,27 +94,23 @@ export async function runRepo({ tree, envVars, analysis, onOutput, onServerReady
 
   const pkg = readPackageJsonAt(tree, workdir);
 
-  // Next.js/Turbopack projects often run best with `next dev`.
-  // If heuristic/LLM failed to detect a start script, try a safe fallback.
   const hasNext = Boolean(pkg?.dependencies?.next || pkg?.devDependencies?.next);
   const nextDevFallback = hasNext ? ['npx', 'next', 'dev'] : null;
 
   const installArgv = analysis?.installCmd ? splitCommand(analysis.installCmd) : ['npm', 'install'];
-
-  onOutput(`Installing dependencies (${installArgv.join(' ')})...\n`);
-  const install = await container.spawn(installArgv[0], installArgv.slice(1), spawnOpts(workdir));
-  await pipeToOutput(install, onOutput);
-  const installExit = await install.exit;
-  if (installExit !== 0) {
-    throw new Error(`${installArgv.join(' ')} failed with exit code ${installExit}`);
-  }
+  if (hasNext) await pinNextForBrowser(container, workdir, onOutput);
+  await installDependencies(container, installArgv, workdir, onOutput);
+  if (hasNext) await patchNextScripts(container, workdir, onOutput);
 
   const startScript = pickStartScript(pkg);
+  const workspace = !startScript && pkg?.workspaces ? await pickWorkspace(container, workdir, pkg) : null;
   const startArgv = analysis?.startCmd
     ? splitCommand(analysis.startCmd)
     : startScript
       ? ['npm', 'run', startScript]
-      : nextDevFallback;
+      : workspace
+        ? ['npm', 'run', workspace.script, '--workspace', workspace.name]
+        : nextDevFallback;
 
   if (!startArgv) {
     // Last-resort fallback for projects without scripts.
@@ -148,8 +144,118 @@ export async function runRepo({ tree, envVars, analysis, onOutput, onServerReady
   return { container, process: run };
 }
 
+// BROWSER=none: create-react-app & co. would otherwise try to open a tab.
+const SANDBOX_ENV = { BROWSER: 'none' };
+
 function spawnOpts(workdir) {
-  return workdir ? { cwd: workdir } : {};
+  return { ...(workdir ? { cwd: workdir } : {}), env: SANDBOX_ENV };
+}
+
+const joinPath = (dir, file) => (dir ? `${dir}/${file}` : file);
+
+/**
+ * Install with the repo's package manager. npm 7+ rejects the conflicting
+ * peer dependencies many older projects shipped with, and pnpm/yarn setups
+ * sometimes fail in the sandbox — retry with npm's lenient mode before giving up.
+ */
+async function installDependencies(container, argv, workdir, onOutput) {
+  onOutput(`Installing dependencies (${argv.join(' ')})...\n`);
+  let proc = await container.spawn(argv[0], argv.slice(1), spawnOpts(workdir));
+  await pipeToOutput(proc, onOutput);
+  if ((await proc.exit) === 0) return;
+
+  onOutput('\nInstall failed — retrying with npm install --legacy-peer-deps...\n');
+  proc = await container.spawn('npm', ['install', '--legacy-peer-deps', '--no-audit', '--no-fund'], spawnOpts(workdir));
+  await pipeToOutput(proc, onOutput);
+  const code = await proc.exit;
+  if (code !== 0) throw new Error(`Installing dependencies failed (exit code ${code}).`);
+}
+
+// Next.js 15.5+ fails inside WebContainers ("Expected workStore to be
+// initialized", vercel/next.js#84026); 15.4 is the newest release that works.
+const NEXT_BROWSER_VERSION = '15.4.11';
+
+/** Does a dependency range ask for Next 15.5 or newer ("latest", "^16", "15.5.2")? */
+function needsOlderNext(range) {
+  if (!range || /latest|canary|rc/.test(range)) return !!range;
+  const m = range.match(/(\d+)(?:\.(\d+))?/);
+  if (!m) return false;
+  const [major, minor] = [Number(m[1]), Number(m[2] || 0)];
+  return major > 15 || (major === 15 && minor >= 5);
+}
+
+/**
+ * Before install: pin Next.js to the newest version that runs in the browser
+ * sandbox. The repo's own version still runs on the engine.
+ */
+async function pinNextForBrowser(container, workdir, onOutput) {
+  const pkgPath = joinPath(workdir, 'package.json');
+  const pkg = JSON.parse(await container.fs.readFile(pkgPath, 'utf-8'));
+  const section = pkg.dependencies?.next ? 'dependencies' : 'devDependencies';
+  const range = pkg[section]?.next;
+  if (!needsOlderNext(range)) return;
+  pkg[section].next = NEXT_BROWSER_VERSION;
+  for (const key of ['dependencies', 'devDependencies']) {
+    if (pkg[key]?.['eslint-config-next']) pkg[key]['eslint-config-next'] = NEXT_BROWSER_VERSION;
+  }
+  await container.fs.writeFile(pkgPath, JSON.stringify(pkg, null, 2));
+  onOutput(`Next.js ${range} can't run in the browser sandbox yet — using Next.js ${NEXT_BROWSER_VERSION} here (the runner engine uses the repo's own version).\n`);
+}
+
+/**
+ * After install: Turbopack needs native bindings the sandbox doesn't have
+ * ("turbo.createProject is not supported by the wasm bindings"), so drop
+ * --turbo/--turbopack and let `next dev` use webpack.
+ */
+async function patchNextScripts(container, workdir, onOutput) {
+  const pkgPath = joinPath(workdir, 'package.json');
+  const pkg = JSON.parse(await container.fs.readFile(pkgPath, 'utf-8'));
+  let changed = false;
+  for (const [name, script] of Object.entries(pkg.scripts || {})) {
+    const fixed = script.replace(/\s--turbo(pack)?\b/g, '').replace(/\s--webpack\b/g, '');
+    if (fixed !== script) {
+      pkg.scripts[name] = fixed;
+      changed = true;
+    }
+  }
+  if (changed) {
+    await container.fs.writeFile(pkgPath, JSON.stringify(pkg, null, 2));
+    onOutput('Using webpack instead of Turbopack (Turbopack can\'t run in the browser sandbox).\n');
+  }
+}
+
+/** For an npm-workspaces root without scripts: a workspace to run, preferring a frontend. */
+async function pickWorkspace(container, workdir, pkg) {
+  const patterns = Array.isArray(pkg.workspaces) ? pkg.workspaces : pkg.workspaces?.packages || [];
+  const dirs = [];
+  for (const pat of patterns) {
+    if (pat.endsWith('/*')) {
+      const base = pat.slice(0, -2);
+      try {
+        for (const e of await container.fs.readdir(joinPath(workdir, base), { withFileTypes: true })) {
+          if (e.isDirectory()) dirs.push(`${base}/${e.name}`);
+        }
+      } catch {
+        // missing folder
+      }
+    } else {
+      dirs.push(pat);
+    }
+  }
+  const FRONTEND = ['vite', 'next', 'react-scripts', '@sveltejs/kit', 'nuxt', 'vue', '@angular/core'];
+  const candidates = [];
+  for (const dir of dirs) {
+    try {
+      const wpkg = JSON.parse(await container.fs.readFile(joinPath(workdir, `${dir}/package.json`), 'utf-8'));
+      const script = pickStartScript(wpkg);
+      if (!wpkg.name || !script) continue;
+      const deps = { ...(wpkg.dependencies || {}), ...(wpkg.devDependencies || {}) };
+      candidates.push({ name: wpkg.name, script, frontend: FRONTEND.some((d) => deps[d]) });
+    } catch {
+      // no package.json there
+    }
+  }
+  return candidates.find((c) => c.frontend) || candidates[0] || null;
 }
 
 async function pipeToOutput(process, onOutput) {
