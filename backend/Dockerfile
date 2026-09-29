@@ -4,7 +4,7 @@
 FROM node:22-bookworm
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      git curl unzip ca-certificates \
+      git git-lfs curl unzip ca-certificates \
       python3 python3-venv python3-pip \
       php-cli php-mbstring php-xml php-curl php-zip php-sqlite3 php-intl composer \
       ruby-full \
@@ -13,7 +13,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # uv creates each Python project's environment (and fetches other Python versions).
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
-RUN gem install bundler --no-document
+RUN gem install bundler --no-document && git lfs install --system
 
 WORKDIR /app
 COPY package.json package-lock.json ./

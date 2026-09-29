@@ -9,7 +9,7 @@ import { createServer } from 'http';
 import simpleGit from 'simple-git';
 import { v4 as uuid } from 'uuid';
 import { join } from 'path';
-import { mkdirSync, rmSync, existsSync, readdirSync, statSync } from 'fs';
+import { mkdirSync, rmSync, existsSync, readdirSync, statSync, readFileSync } from 'fs';
 import { detectRuntime, detectEnvVars, detectEnvVarsFromCode, detectServices, isPromptableSecret, envKeysWithDefaults, detectOrchestratedScript } from './detector.js';
 import { startSandbox, stopSandbox, getSession, cleanupAll } from './sandbox.js';
 import {
@@ -198,6 +198,15 @@ app.post('/api/analyze', async (req, res) => {
       : repoUrl;
 
     await git.clone(cloneUrl, repoDir, ['--depth', '1', ...(cloneBranch ? ['--branch', cloneBranch] : [])]);
+
+    // Model weights and datasets often live in Git LFS; without git-lfs set up
+    // as a clone filter, the checkout only has pointer files.
+    const attrs = existsSync(join(repoDir, '.gitattributes')) ? readFileSync(join(repoDir, '.gitattributes'), 'utf8') : '';
+    if (/filter=lfs/.test(attrs)) {
+      await simpleGit(repoDir).raw(['lfs', 'pull']).catch((err) => {
+        console.warn(`[engine] git lfs pull failed for ${repoUrl}: ${err.message.split('\n')[0]}`);
+      });
+    }
 
     // Detect runtime
     const runtime = detectRuntime(repoDir);

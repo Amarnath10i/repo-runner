@@ -179,12 +179,29 @@ async function downloadBlobs({ owner, repo, branch, token, tree, entries, onProg
   await Promise.all(Array.from({ length: Math.min(CONCURRENCY, entries.length) }, worker));
 }
 
+// Git LFS files come back from raw.githubusercontent.com as small pointer
+// files; the real content (model weights, datasets) is on media.githubusercontent.com.
+const LFS_POINTER = 'version https://git-lfs.github.com/spec/v1';
+
+function isLfsPointer(bytes) {
+  return bytes.length < 1024 && new TextDecoder().decode(bytes.subarray(0, LFS_POINTER.length)) === LFS_POINTER;
+}
+
 async function fetchFileContents({ owner, repo, branch, token, entry }) {
   const binary = BINARY_EXT.test(entry.path);
-  const rawUrl = `https://raw.githubusercontent.com/${owner}/${repo}/${branch}/${entry.path.split('/').map(encodeURIComponent).join('/')}`;
+  const filePath = entry.path.split('/').map(encodeURIComponent).join('/');
+  const rawUrl = `https://raw.githubusercontent.com/${owner}/${repo}/${branch}/${filePath}`;
+  const auth = token ? { headers: { Authorization: `Bearer ${token}` } } : undefined;
   try {
-    const res = await fetch(rawUrl, token ? { headers: { Authorization: `Bearer ${token}` } } : undefined);
-    if (res.ok) return binary ? new Uint8Array(await res.arrayBuffer()) : await res.text();
+    const res = await fetch(rawUrl, auth);
+    if (res.ok) {
+      let bytes = new Uint8Array(await res.arrayBuffer());
+      if (isLfsPointer(bytes)) {
+        const media = await fetch(`https://media.githubusercontent.com/media/${owner}/${repo}/${branch}/${filePath}`, auth).catch(() => null);
+        if (media?.ok) bytes = new Uint8Array(await media.arrayBuffer());
+      }
+      return binary ? bytes : new TextDecoder('utf-8', { fatal: false }).decode(bytes);
+    }
   } catch {
     // fall through to the API
   }
