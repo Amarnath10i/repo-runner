@@ -190,6 +190,11 @@ const NATIVE_ADDON_DEPS = new Set([
 
 export function webContainerIncompatibleReason(pkg) {
   const deps = { ...(pkg?.dependencies || {}), ...(pkg?.devDependencies || {}) };
+  const scripts = Object.values(pkg?.scripts || {}).join(' ');
+  if (/^bun@/.test(pkg?.packageManager || '') || /(^|\s|&&)bun(x)?\s/.test(scripts)) {
+    return 'This is a Bun project, and Bun can\'t run in the browser sandbox';
+  }
+  if (deps.turbo && /\bturbo\s/.test(scripts)) return 'Turborepo is a native program that can\'t run in the browser sandbox';
   if (deps.next) return 'Next.js uses native/WASM bindings that break in-browser';
   const native = Object.keys(deps).find((d) => NATIVE_ADDON_DEPS.has(d));
   if (native) return `"${native}" is a native module that can't load in a browser sandbox`;
@@ -198,6 +203,9 @@ export function webContainerIncompatibleReason(pkg) {
 
 /** Scan every package.json in the tree (root + subfolders) for a blocker. */
 export function treeWebContainerBlocker(tree) {
+  if (tree['bun.lockb']?.file || tree['bun.lock']?.file) {
+    return 'This is a Bun project, and Bun can\'t run in the browser sandbox';
+  }
   const queue = [tree];
   while (queue.length) {
     const node = queue.shift();

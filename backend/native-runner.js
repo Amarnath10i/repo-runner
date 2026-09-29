@@ -1013,7 +1013,7 @@ function buildStartCommand({ runtime, hostPort, processEnv, cwd, prepared = {} }
       return { startCmd: PY, startArgs: [runtime.manage || 'manage.py', 'runserver', `0.0.0.0:${port}`] };
     case 'python-streamlit': {
       const appFile = runtime.start?.match(/streamlit\s+run\s+(\S+)/)?.[1] || 'app.py';
-      return { startCmd: PY, startArgs: ['-m', 'streamlit', 'run', appFile, '--server.port', port, '--server.headless', 'true', '--server.address', '0.0.0.0'] };
+      return { startCmd: PY, startArgs: ['-m', 'streamlit', 'run', appFile, '--server.port', port, '--server.headless', 'true', '--server.address', '0.0.0.0', '--global.developmentMode', 'false'] };
     }
     case 'python-gradio': {
       processEnv.GRADIO_SERVER_PORT = port;
@@ -1082,6 +1082,7 @@ function buildStartCommand({ runtime, hostPort, processEnv, cwd, prepared = {} }
     case 'dotnet': {
       processEnv.ASPNETCORE_URLS = `http://127.0.0.1:${port}`;
       processEnv.DOTNET_ROLL_FORWARD = 'Major'; // run older targets on the installed runtime
+      processEnv.ASPNETCORE_ENVIRONMENT ||= 'Development'; // most templates only enable Swagger here
       processEnv.DOTNET_NOLOGO = '1';
       processEnv.DOTNET_CLI_TELEMETRY_OPTOUT = '1';
       const project = runtime.project ? ['--project', runtime.project] : [];

@@ -68,6 +68,10 @@ function normalizeRepoUrl(input) {
   return trimmed;
 }
 
+// The whole run's output as plain text (for "Copy log"; also handy in devtools).
+const fullLog = { text: '' };
+if (typeof window !== 'undefined') window.__repoRunnerLog = fullLog;
+
 const stripAnsi = (s) => s.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '');
 
 function formatElapsed(sec) {
@@ -240,8 +244,11 @@ export default function App() {
       setPhase((p) => (p === 'start' ? p : 'install'));
     }
     if (/\[start\]|\[serve\]|Starting the app|▸ Running /.test(text)) setPhase('start');
-    const lines = stripAnsi(text).split(/[\r\n]+/).map((l) => l.trim()).filter(Boolean);
+    const plain = stripAnsi(text);
+    const lines = plain.split(/[\r\n]+/).map((l) => l.trim()).filter(Boolean);
     if (lines.length) lastLineRef.current = lines[lines.length - 1];
+    // Full plain-text log for "Copy log" (the terminal only keeps its scrollback).
+    fullLog.text = (fullLog.text + plain).slice(-500_000);
     termInstance.current?.write(text.replace(/\r?\n/g, '\r\n'));
   }, []);
 
@@ -296,6 +303,7 @@ export default function App() {
     await stopEverything();
     resetRunState();
     termInstance.current?.clear();
+    fullLog.text = '';
     setStage(STAGES.FETCHING);
 
     try {
@@ -364,6 +372,10 @@ export default function App() {
       }
 
       if (!status.serverOnline) {
+        if (analysis.runtime === 'node' && /Bun|Turborepo/.test(analysis.reasoning || '')) {
+          fail(`${analysis.reasoning.split(' — ')[0]}.`, 'needs-engine');
+          return;
+        }
         if (analysis.runtime === 'node') {
           // No engine to fall back to — the browser sandbox is the best chance.
           writeLog(`\x1b[33m⚠ ${analysis.reasoning} No engine is connected, so trying in the browser anyway.\x1b[0m\n`);
@@ -904,6 +916,17 @@ export default function App() {
               <button
                 className="icon-btn"
                 type="button"
+                title="Copy log"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  navigator.clipboard?.writeText(fullLog.text).catch(() => {});
+                }}
+              >
+                <CopyIcon />
+              </button>
+              <button
+                className="icon-btn"
+                type="button"
                 title="Clear"
                 onClick={(e) => {
                   e.stopPropagation();
@@ -1119,6 +1142,7 @@ const ExternalIcon = () => <svg {...svgProps}><path d="M14 4h6v6M20 4l-9 9M19 14
 const LockIcon = () => <svg {...svgProps} width={12} height={12}><rect x="5" y="11" width="14" height="10" rx="2" /><path d="M8 11V7a4 4 0 0 1 8 0v4" /></svg>;
 const CheckIcon = () => <svg {...svgProps} width={14} height={14} strokeWidth={3}><path d="M5 12l5 5L20 7" /></svg>;
 const TerminalIcon = () => <svg {...svgProps} width={14} height={14}><path d="M4 17l6-5-6-5M12 19h8" /></svg>;
+const CopyIcon = () => <svg {...svgProps} width={14} height={14}><rect x="9" y="9" width="11" height="11" rx="2" /><path d="M5 15V5a2 2 0 0 1 2-2h10" /></svg>;
 const ClearIcon = () => <svg {...svgProps} width={14} height={14}><path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14" /></svg>;
 const ServerIcon = () => <svg {...svgProps} width={26} height={26}><rect x="3" y="4" width="18" height="7" rx="2" /><rect x="3" y="13" width="18" height="7" rx="2" /><path d="M7 7.5h.01M7 16.5h.01" /></svg>;
 const ChevronIcon = ({ up }) => <svg {...svgProps} width={14} height={14}>{up ? <path d="M6 15l6-6 6 6" /> : <path d="M6 9l6 6 6-6" />}</svg>;

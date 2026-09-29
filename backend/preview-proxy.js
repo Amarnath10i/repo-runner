@@ -11,7 +11,7 @@
 // frame-ancestors — Django and Spring Security send these by default) are
 // stripped, and WebSockets (HMR, Streamlit) are forwarded.
 
-import { createServer } from 'http';
+import { createServer, get as httpGet } from 'http';
 import httpProxy from 'http-proxy';
 
 const proxy = httpProxy.createProxyServer({ changeOrigin: true, ws: true });
@@ -42,6 +42,38 @@ proxy.on('error', (err, req, res) => {
     res?.destroy?.(); // a WebSocket socket
   }
 });
+
+// ─── Landing page ───
+
+function statusOf(port, path, host) {
+  return new Promise((resolve) => {
+    const req = httpGet({ host, port, path, timeout: 3000 }, (res) => {
+      res.resume();
+      resolve(res.statusCode);
+    });
+    req.on('timeout', () => req.destroy());
+    req.on('error', () => resolve(0));
+  });
+}
+
+// Where API-only backends keep something worth looking at.
+const LANDING_PATHS = ['/docs', '/swagger', '/swagger/index.html', '/api-docs', '/redoc', '/api', '/health'];
+
+/**
+ * The path to open in the preview: '' normally, but for an API whose root is
+ * a 404 (FastAPI, ASP.NET minimal APIs, Express APIs) its docs page if any.
+ */
+export async function findLandingPath(port) {
+  let root = await statusOf(port, '/', '127.0.0.1');
+  const host = root ? '127.0.0.1' : '::1';
+  if (!root) root = await statusOf(port, '/', host);
+  if (root !== 404) return '';
+  for (const path of LANDING_PATHS) {
+    const status = await statusOf(port, path, host);
+    if (status >= 200 && status < 400) return path;
+  }
+  return '';
+}
 
 // ─── Local mode: one proxy port per session ───
 

@@ -99,6 +99,7 @@ export async function runRepo({ tree, envVars, analysis, onOutput, onServerReady
 
   const installArgv = analysis?.installCmd ? splitCommand(analysis.installCmd) : ['npm', 'install'];
   if (hasNext) await pinNextForBrowser(container, workdir, onOutput);
+  await upgradeOldEsbuild(container, workdir, onOutput);
   await installDependencies(container, installArgv, workdir, onOutput);
   if (hasNext) await patchNextScripts(container, workdir, onOutput);
 
@@ -165,10 +166,21 @@ async function installDependencies(container, argv, workdir, onOutput) {
   if ((await proc.exit) === 0) return;
 
   onOutput('\nInstall failed — retrying with npm install --legacy-peer-deps...\n');
+  let log = '';
   proc = await container.spawn('npm', ['install', '--legacy-peer-deps', '--no-audit', '--no-fund'], spawnOpts(workdir));
-  await pipeToOutput(proc, onOutput);
+  await pipeToOutput(proc, (text) => {
+    log = (log + text).slice(-20000);
+    onOutput(text);
+  });
   const code = await proc.exit;
-  if (code !== 0) throw new Error(`Installing dependencies failed (exit code ${code}).`);
+  if (code === 0) return;
+  if (/codeload\.github\.com|git\+|github:|Unsupported URL Type "git/i.test(log)) {
+    throw new Error('A dependency is downloaded straight from a git repository, which the browser sandbox can\'t do — it needs the runner engine.');
+  }
+  if (/Unsupported URL Type "workspace:/i.test(log)) {
+    throw new Error('This monorepo uses "workspace:" dependencies that need pnpm or Bun — it needs the runner engine.');
+  }
+  throw new Error(`Installing dependencies failed (exit code ${code}).`);
 }
 
 // Next.js 15.5+ fails inside WebContainers ("Expected workStore to be
@@ -222,6 +234,24 @@ async function patchNextScripts(container, workdir, onOutput) {
     await container.fs.writeFile(pkgPath, JSON.stringify(pkg, null, 2));
     onOutput('Using webpack instead of Turbopack (Turbopack can\'t run in the browser sandbox).\n');
   }
+}
+
+// esbuild before ~0.17 (pulled in by Vite 2/3) dies in WebContainers with
+// "The service was stopped"; Vite only uses its stable transform/build API,
+// so a newer esbuild works in its place.
+const ESBUILD_FOR_OLD_VITE = '0.18.20';
+
+async function upgradeOldEsbuild(container, workdir, onOutput) {
+  const pkgPath = joinPath(workdir, 'package.json');
+  const pkg = JSON.parse(await container.fs.readFile(pkgPath, 'utf-8'));
+  const vite = pkg.devDependencies?.vite || pkg.dependencies?.vite;
+  const major = Number(vite?.match(/(\d+)/)?.[1]);
+  if (!vite || !(major <= 3)) return;
+  pkg.overrides = { ...(pkg.overrides || {}), esbuild: ESBUILD_FOR_OLD_VITE };
+  await container.fs.writeFile(pkgPath, JSON.stringify(pkg, null, 2));
+  // The lockfile pins the old esbuild; let npm re-resolve.
+  await container.fs.rm(joinPath(workdir, 'package-lock.json'), { force: true }).catch(() => {});
+  onOutput(`Vite ${major}: using esbuild ${ESBUILD_FOR_OLD_VITE} (its original esbuild can't run in the browser sandbox).\n`);
 }
 
 /** For an npm-workspaces root without scripts: a workspace to run, preferring a frontend. */

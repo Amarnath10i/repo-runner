@@ -23,7 +23,7 @@ import {
   writeToSession,
   listPreviewSessions,
 } from './native-runner.js';
-import { openPortProxy, closePortProxy, sweepPortProxies, createPathProxy } from './preview-proxy.js';
+import { openPortProxy, closePortProxy, sweepPortProxies, createPathProxy, findLandingPath } from './preview-proxy.js';
 // Docker is optional — the server starts even if Docker Desktop isn't running.
 // We create the instance lazily and never let it crash the startup.
 let dockerCheck = null;
@@ -139,12 +139,14 @@ function isLocalRequest(req) {
  * /preview/<id>/ on its public URL.
  */
 async function previewUrlFor(req, sessionId, port) {
+  // An API with nothing at "/" opens on its docs page instead of a 404.
+  const landing = await findLandingPath(port);
   if (isLocalRequest(req)) {
-    return `http://localhost:${await openPortProxy(sessionId, port)}`;
+    return `http://localhost:${await openPortProxy(sessionId, port)}${landing}`;
   }
   const proto = (req.headers['x-forwarded-proto'] || req.protocol).split(',')[0];
   const host = req.headers['x-forwarded-host'] || req.headers.host;
-  return `${proto}://${host}/preview/${sessionId}/`;
+  return `${proto}://${host}/preview/${sessionId}${landing || '/'}`;
 }
 
 server.on('upgrade', (req, socket, head) => {
