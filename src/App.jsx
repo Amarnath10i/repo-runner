@@ -18,7 +18,7 @@ import {
   getPreviewUrl,
   checkBackendStatus,
   BACKEND_IS_LOCAL,
-  getEngineUrl,
+  savedEngineUrl,
   setEngineUrl,
 } from './lib/backend-runner.js';
 
@@ -1113,7 +1113,7 @@ function ConsolePanel({ done, figures, inputEnabled, awaitingInput, onFocusTermi
 }
 
 function ErrorPanel({ message, kind, onRetry, onConnect, onBack }) {
-  const [engineUrl, setEngineUrlInput] = useState(getEngineUrl() || 'http://localhost:3001');
+  const [engineUrl, setEngineUrlInput] = useState(savedEngineUrl() || 'http://localhost:3001');
   if (kind === 'needs-engine') {
     return (
       <div className="error-panel">

@@ -1,9 +1,15 @@
 # Repo Runner
 
-🚀 **[Live Demo → github-runner-kappa.vercel.app](https://github-runner-kappa.vercel.app)**
+🚀 **[Live Demo → github-runner-kappa.vercel.app](https://github-runner-kappa.vercel.app)** (use Chrome or Edge)
 
 **Paste a GitHub URL → get a live demo.** Repo Runner detects a repo's stack,
 installs its dependencies, runs it, and shows a live preview — automatically.
+
+- **In your browser** (nothing to install): Node.js, Python, Streamlit, notebooks,
+  Hugging Face pipelines on your GPU, and static sites.
+- **With the runner engine** (run it locally or [deploy it](DEPLOY.md)): everything
+  else — Java, Go, Rust, C/C++, PHP, Ruby, .NET, Python web apps, ML/AI apps and
+  full-stack monorepos. On the live site, click **Connect engine** after starting it.
 
 ## Where repos run
 

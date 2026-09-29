@@ -19,7 +19,13 @@ function storedEngine() {
   }
 }
 
-let BACKEND_URL = import.meta.env.VITE_BACKEND_URL || (PAGE_IS_LOCAL ? LOCAL_ENGINE : storedEngine());
+// An engine the visitor connected to themselves wins over the build default.
+let BACKEND_URL = storedEngine() || import.meta.env.VITE_BACKEND_URL || (PAGE_IS_LOCAL ? LOCAL_ENGINE : null);
+
+/** The engine this visitor last connected to (for prefilling the URL box). */
+export function savedEngineUrl() {
+  return storedEngine();
+}
 
 /** True when the engine runs on this machine (not a deployed server). */
 export const BACKEND_IS_LOCAL = !import.meta.env.VITE_BACKEND_URL;
@@ -141,15 +147,16 @@ export async function checkBackendStatus({ maxRetries = 1, retryDelayMs = 1500 }
       const res = await fetch(`${BACKEND_URL}/api/status/health-check`, {
         signal: AbortSignal.timeout(3000),
       });
-      if (res.ok) {
-        const data = await res.json();
+      // Only a real engine counts: a host's 404 page or a proxy error isn't one.
+      const data = res.ok ? await res.json().catch(() => null) : null;
+      if (data?.status === 'ok') {
         return {
           serverOnline: true,
           dockerOnline: data.docker === 'online',
           nativeRuntimes: data.nativeRuntimes || {},
         };
       }
-      return { serverOnline: true, dockerOnline: false, nativeRuntimes: {} };
+      return offline;
     } catch {
       if (attempt < maxRetries) await new Promise((r) => setTimeout(r, retryDelayMs));
     }
