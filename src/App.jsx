@@ -2,10 +2,13 @@ import { useEffect, useRef, useState, useCallback } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
-import { parseGithubUrl, getDefaultBranch, fetchRepoTree, hydrateAllFiles, detectEnvVars } from './lib/github.js';
-import { runRepo } from './lib/runner.js';
+import { parseGithubUrl, fetchRepoTree, hydrateAllFiles, detectEnvVars } from './lib/github.js';
+import { runRepo, stopActiveRun } from './lib/runner.js';
+import { runStaticSite } from './lib/static-runner.js';
+import { runPythonInBrowser, buildStlitePage } from './lib/python-runner.js';
+import { planBrowserRun } from './lib/browser-plan.js';
 import { analyzeRepo, checkOllamaAvailable } from './lib/ollama.js';
-import { analyzeTreeLocally, isPromptableSecret } from './lib/heuristics.js';
+import { analyzeTreeLocally, detectStack, isPromptableSecret } from './lib/heuristics.js';
 import {
   analyzeRepoBackend,
   runRepoBackend,
@@ -14,6 +17,8 @@ import {
   connectWebSocket,
   getPreviewUrl,
   checkBackendStatus,
+  BACKEND_IS_LOCAL,
+  connectLocalEngine,
 } from './lib/backend-runner.js';
 
 const STAGES = {
@@ -27,63 +32,78 @@ const STAGES = {
   ERROR: 'error',
 };
 
-const PIPELINE_STEPS = [
+const STEPS = [
   { key: 'fetch', label: 'Fetch' },
-  { key: 'analyze', label: 'Detect' },
-  { key: 'build', label: 'Build' },
-  { key: 'run', label: 'Run' },
+  { key: 'detect', label: 'Detect' },
+  { key: 'install', label: 'Install' },
+  { key: 'start', label: 'Start' },
   { key: 'live', label: 'Live' },
 ];
 
-const SUPPORTED_RUNTIMES = [
-  { label: 'Node.js', color: '#68a063' },
-  { label: 'Python', color: '#3776ab' },
-  { label: 'Streamlit', color: '#ff4b4b' },
-  { label: 'FastAPI', color: '#009688' },
-  { label: 'Go', color: '#00add8' },
-  { label: 'Rust', color: '#dea584' },
-  { label: 'Ruby', color: '#cc342d' },
-  { label: 'PHP', color: '#777bb4' },
-  { label: 'Java', color: '#f89820' },
-  { label: '.NET', color: '#512bd4' },
-  { label: 'Docker', color: '#2496ed' },
+// Rough progress for each step; the bar creeps toward the next value while a
+// step runs so long installs still show movement.
+const STEP_PROGRESS = { fetch: [4, 18], detect: [18, 30], install: [30, 78], start: [78, 94], live: [100, 100] };
+
+const IN_BROWSER_STACKS = ['Node.js', 'Python', 'Streamlit', 'Notebooks', 'Static sites'];
+const ENGINE_STACKS = ['Java', 'Go', 'Rust', 'C / C++', 'PHP', 'Ruby', '.NET', 'Django', 'Flask', 'FastAPI', 'Gradio'];
+
+const EXAMPLES = [
+  { label: 'Express app', url: 'https://github.com/heroku/node-js-getting-started' },
+  { label: 'Streamlit demo', url: 'https://github.com/streamlit/streamlit-example' },
+  { label: 'Static site', url: 'https://github.com/bradtraversy/50projects50days' },
 ];
 
-function stageToStep(stage) {
-  switch (stage) {
-    case STAGES.FETCHING: return 'fetch';
-    case STAGES.ANALYZING: return 'analyze';
-    case STAGES.BUILDING: return 'build';
-    case STAGES.RUNNING: return 'run';
-    case STAGES.READY: return 'live';
-    default: return null;
-  }
+const MODE_LABELS = {
+  webcontainer: 'Running in your browser',
+  browser: 'Running in your browser',
+  native: 'Running on the engine',
+  docker: 'Running in Docker',
+};
+
+/** Normalize "github.com/o/r", "o/r" or a full URL into https://github.com/o/r[/tree/b]. */
+function normalizeRepoUrl(input) {
+  const trimmed = input.trim();
+  if (/^[\w.-]+\/[\w.-]+$/.test(trimmed)) return `https://github.com/${trimmed}`;
+  if (/^github\.com\//i.test(trimmed)) return `https://${trimmed}`;
+  return trimmed;
 }
 
-function stepIndex(key) {
-  return PIPELINE_STEPS.findIndex((s) => s.key === key);
+const stripAnsi = (s) => s.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '');
+
+function formatElapsed(sec) {
+  const m = Math.floor(sec / 60);
+  const s = Math.floor(sec % 60);
+  return `${m}:${String(s).padStart(2, '0')}`;
 }
 
 export default function App() {
   const [repoUrl, setRepoUrl] = useState('');
+  const [repoName, setRepoName] = useState('');
   // Pre-fill the GitHub token from a local .env (VITE_GITHUB_TOKEN) so it
-  // doesn't have to be entered every time. Still editable in the UI.
-  const [token, setToken] = useState(import.meta.env.VITE_GITHUB_TOKEN || '');
+  // doesn't have to be entered every time.
+  const [token] = useState(import.meta.env.VITE_GITHUB_TOKEN || '');
   const [ollamaEndpoint] = useState('http://localhost:11434');
   const [ollamaModel, setOllamaModel] = useState('llama3.1');
   // Auto-enabled when a local Ollama server is detected (no manual toggle).
   const [useOllama, setUseOllama] = useState(false);
   const [stage, setStage] = useState(STAGES.IDLE);
   const [errorMsg, setErrorMsg] = useState('');
+  const [errorKind, setErrorKind] = useState(null); // null | 'needs-engine'
   const [detectedKeys, setDetectedKeys] = useState([]);
   const [envValues, setEnvValues] = useState({});
   const [previewUrl, setPreviewUrl] = useState('');
+  const [previewKey, setPreviewKey] = useState(0);
   const [runtimeInfo, setRuntimeInfo] = useState(null);
   const [serverOnline, setServerOnline] = useState(false);
   const [dockerOnline, setDockerOnline] = useState(false);
-  const [nativeRuntimes, setNativeRuntimes] = useState({});
-  const [executionMode, setExecutionMode] = useState(null); // 'webcontainer' | 'docker' | 'native'
+  const [executionMode, setExecutionMode] = useState(null); // 'webcontainer' | 'browser' | 'docker' | 'native'
   const [isTerminalOpen, setIsTerminalOpen] = useState(true);
+  const [phase, setPhase] = useState(null); // 'install' | 'start' — from the logs
+  const [activity, setActivity] = useState('');
+  const [figures, setFigures] = useState([]);
+  const [programDone, setProgramDone] = useState(null); // exit code of a console program
+  const [inputEnabled, setInputEnabled] = useState(false);
+  const [awaitingInput, setAwaitingInput] = useState(false);
 
   const treeRef = useRef(null);
   const blobsRef = useRef(null);
@@ -95,31 +115,36 @@ export default function App() {
   const sessionRef = useRef(null);
   const wsRef = useRef(null);
   const fellBackRef = useRef(false);
+  const repoUrlRef = useRef('');
+  const pythonRef = useRef(null);
+  const inputTargetRef = useRef(null); // (line) => void — where terminal input goes
+  const lastLineRef = useRef('');
+  const blobUrlRef = useRef(null);
 
-  // Check backend availability on mount (with retries for auto-start race condition)
+  // Check backend availability on mount (with retries for the auto-start race).
   const refreshBackendStatus = useCallback(async (retries = 1) => {
     const status = await checkBackendStatus({ maxRetries: retries, retryDelayMs: 2000 });
     setServerOnline(status.serverOnline);
     setDockerOnline(status.dockerOnline);
-    setNativeRuntimes(status.nativeRuntimes || {});
     return status;
   }, []);
 
   useEffect(() => {
-    // On first load, retry a few times because the Vite plugin may still be starting the backend
-    refreshBackendStatus(3);
-    const interval = setInterval(() => refreshBackendStatus(0), 10000);
+    // A deployed UI has no local dev server racing to start, so don't retry.
+    refreshBackendStatus(BACKEND_IS_LOCAL && import.meta.env.DEV ? 3 : 0);
+    const interval = setInterval(() => refreshBackendStatus(0), 15000);
     return () => clearInterval(interval);
   }, [refreshBackendStatus]);
 
-  // Auto-enable Ollama analysis when a local Ollama server is detected — no UI
-  // toggle needed. Falls back silently to the built-in heuristic otherwise.
+  // Auto-enable Ollama analysis when a local Ollama server is detected. Only
+  // when the UI itself is local: a public site probing the visitor's
+  // localhost triggers a browser permission prompt.
   useEffect(() => {
+    if (!/^(localhost|127\.0\.0\.1|\[::1\])$/.test(location.hostname)) return undefined;
     let cancelled = false;
     checkOllamaAvailable(ollamaEndpoint).then(({ available, models }) => {
       if (cancelled || !available) return;
       setUseOllama(true);
-      // Prefer the configured model, else the first one the server has.
       setOllamaModel((cur) =>
         models.length && !models.some((m) => m.startsWith(cur)) ? models[0] : cur
       );
@@ -134,83 +159,94 @@ export default function App() {
     const term = new Terminal({
       convertEol: true,
       allowTransparency: true,
+      cursorBlink: true,
       fontFamily: '"JetBrains Mono", "Fira Code", monospace',
       fontSize: 13,
       lineHeight: 1.4,
       theme: {
         background: 'rgba(0, 0, 0, 0)',
-        foreground: '#c8d0e0',
-        cursor: '#5a7aee',
-        cursorAccent: '#030508',
-        selectionBackground: 'rgba(90, 122, 238, 0.15)',
+        foreground: '#c9d1d9',
+        cursor: '#a78bfa',
+        cursorAccent: '#07070a',
+        selectionBackground: 'rgba(167, 139, 250, 0.25)',
         black: '#0e1218',
-        brightBlack: '#2a3040',
-        red: '#c04848',
-        brightRed: '#e05252',
-        green: '#2bb87a',
-        brightGreen: '#4cc98e',
-        yellow: '#c89520',
-        brightYellow: '#d4a020',
-        blue: '#5a7aee',
-        brightBlue: '#7a96f0',
-        magenta: '#8b72e0',
-        brightMagenta: '#a68ef0',
-        cyan: '#1ab8d4',
-        brightCyan: '#40c8e0',
-        white: '#a0a8b8',
-        brightWhite: '#c8cdd8',
+        brightBlack: '#5c6370',
+        red: '#f47067',
+        brightRed: '#ff8b82',
+        green: '#57d68d',
+        brightGreen: '#7ee2a8',
+        yellow: '#e3b341',
+        brightYellow: '#f0c85a',
+        blue: '#6cb6ff',
+        brightBlue: '#96ccff',
+        magenta: '#c49bff',
+        brightMagenta: '#dcbdfb',
+        cyan: '#56d4dd',
+        brightCyan: '#7fe3ea',
+        white: '#adbac7',
+        brightWhite: '#e6edf3',
       },
     });
     const fit = new FitAddon();
     term.loadAddon(fit);
-    
     if (termRef.current) {
       term.open(termRef.current);
-      try { fit.fit(); } catch (e) {}
+      try { fit.fit(); } catch {}
     }
-    
     termInstance.current = term;
     fitAddon.current = fit;
 
+    // Line-buffered input for programs that read stdin (input(), cin, gets…).
+    let line = '';
+    const onData = term.onData((data) => {
+      const send = inputTargetRef.current;
+      if (!send) return;
+      for (const ch of data) {
+        if (ch === '\r') {
+          term.write('\r\n');
+          send(line);
+          line = '';
+          setAwaitingInput(false);
+        } else if (ch === '\x7f' || ch === '\b') {
+          if (line) {
+            line = line.slice(0, -1);
+            term.write('\b \b');
+          }
+        } else if (ch >= ' ' || ch === '\t') {
+          line += ch;
+          term.write(ch);
+        }
+      }
+    });
+
     const onResize = () => {
-      try { fit.fit(); } catch (e) {}
+      try { fit.fit(); } catch {}
     };
-
-    let resizeObserver = null;
-    if (termRef.current) {
-      // Use ResizeObserver so xterm automatically fits when the drawer toggles or un-hides
-      resizeObserver = new ResizeObserver(() => {
-        window.requestAnimationFrame(() => onResize());
-      });
-      resizeObserver.observe(termRef.current);
-    }
-
+    const resizeObserver = new ResizeObserver(() => window.requestAnimationFrame(onResize));
+    if (termRef.current) resizeObserver.observe(termRef.current);
     window.addEventListener('resize', onResize);
     return () => {
       window.removeEventListener('resize', onResize);
-      if (resizeObserver) resizeObserver.disconnect();
+      resizeObserver.disconnect();
+      onData.dispose();
       term.dispose();
     };
   }, []);
 
-  const [terminalProgress, setTerminalProgress] = useState(null);
-
   const writeLog = useCallback((text) => {
-    // Parse backend logs to update progress more accurately
-    if (text.includes('[setup]')) {
-      setTerminalProgress({ percent: 20, eta: '~ 20s' });
-    } else if (text.includes('[install]')) {
-      setTerminalProgress({ percent: 40, eta: '~ 30s' });
-    } else if (text.includes('[build]')) {
-      setTerminalProgress({ percent: 60, eta: '~ 15s' });
-    } else if (text.includes('[start]')) {
-      setTerminalProgress({ percent: 80, eta: '~ 5s' });
-    } else if (text.includes('[serve]')) {
-      setTerminalProgress({ percent: 85, eta: '~ 2s' });
-    } else if (text.includes('[ready]')) {
-      setTerminalProgress({ percent: 100, eta: 'Done' });
+    if (/\[install\]|\[setup\]|\[build\]|Installing|Downloading project files|not found — downloading|Compiling/i.test(text)) {
+      setPhase((p) => (p === 'start' ? p : 'install'));
     }
-    termInstance.current?.write(text.replace(/\n/g, '\r\n'));
+    if (/\[start\]|\[serve\]|Starting the app|▸ Running /.test(text)) setPhase('start');
+    const lines = stripAnsi(text).split(/[\r\n]+/).map((l) => l.trim()).filter(Boolean);
+    if (lines.length) lastLineRef.current = lines[lines.length - 1];
+    termInstance.current?.write(text.replace(/\r?\n/g, '\r\n'));
+  }, []);
+
+  // Surface the latest log line as "what's happening now" (throttled).
+  useEffect(() => {
+    const id = setInterval(() => setActivity(lastLineRef.current.slice(0, 160)), 250);
+    return () => clearInterval(id);
   }, []);
 
   // Refit the terminal whenever the panel opens/closes so content isn't clipped.
@@ -219,29 +255,53 @@ export default function App() {
     return () => clearTimeout(id);
   }, [isTerminalOpen]);
 
-  // ─── Main Flow ───
-
-  async function handleFetchRepo(e) {
-    e.preventDefault();
+  function resetRunState() {
     setErrorMsg('');
+    setErrorKind(null);
     setRuntimeInfo(null);
     setPreviewUrl('');
     setExecutionMode(null);
+    setPhase(null);
+    setFigures([]);
+    setProgramDone(null);
+    setAwaitingInput(false);
+    setInputTarget(null);
+    lastLineRef.current = '';
     analysisRef.current = null;
     sessionRef.current = null;
     fellBackRef.current = false;
+  }
+
+  function setInputTarget(fn) {
+    inputTargetRef.current = fn;
+    setInputEnabled(!!fn);
+  }
+
+  function fail(message, kind = null) {
+    setErrorMsg(message);
+    setErrorKind(kind);
+    setStage(STAGES.ERROR);
+    writeLog(`\n\x1b[1;31m✗ ${message}\x1b[0m\n`);
+  }
+
+  // ─── Main Flow ───
+
+  async function handleFetchRepo(e) {
+    e?.preventDefault();
+    await stopEverything();
+    resetRunState();
     termInstance.current?.clear();
     setStage(STAGES.FETCHING);
 
     try {
-      const { owner, repo, branch: urlBranch } = parseGithubUrl(repoUrl);
-      writeLog(`\x1b[1;36m▸ Resolving ${owner}/${repo}...\x1b[0m\n`);
-      const branch = urlBranch || (await getDefaultBranch(owner, repo, token));
-      writeLog(`  Branch: \x1b[33m${branch}\x1b[0m\n`);
+      const url = normalizeRepoUrl(repoUrl);
+      repoUrlRef.current = url;
+      const { owner, repo, branch: urlBranch } = parseGithubUrl(url);
+      setRepoName(`${owner}/${repo}`);
+      // 'HEAD' is the default branch — saves a GitHub API call.
+      const branch = urlBranch || 'HEAD';
+      writeLog(`\x1b[1;36m▸ Fetching ${owner}/${repo}${urlBranch ? ` (${urlBranch})` : ''}…\x1b[0m\n`);
 
-      // Fetch just the file list + manifest contents to analyze. Full file
-      // contents are only downloaded later if we run in-browser (WebContainer).
-      writeLog(`\x1b[1;36m▸ Fetching repository files...\x1b[0m\n`);
       const { tree, blobs } = await fetchRepoTree({
         owner,
         repo,
@@ -253,136 +313,167 @@ export default function App() {
       blobsRef.current = blobs;
       repoMetaRef.current = { owner, repo, branch, token };
 
-      // ── Analysis phase ──
+      // ── Analysis ──
       setStage(STAGES.ANALYZING);
-
       let analysis = null;
-
-      // Try Ollama first if enabled
       if (useOllama) {
-        writeLog(`\n\x1b[1;35m▸ Asking Ollama to analyze the repo...\x1b[0m\n`);
+        writeLog(`\n\x1b[1;35m▸ Asking Ollama to analyze the repo…\x1b[0m\n`);
         const ollamaResult = await analyzeRepo({
           tree,
           endpoint: ollamaEndpoint,
           model: ollamaModel,
           onProgress: (msg) => writeLog(msg),
         });
-
         if (ollamaResult.ok) {
           analysis = ollamaResult;
           writeLog(`\n  Runtime: \x1b[33m${analysis.runtime}\x1b[0m\n`);
-          writeLog(`  Can run in browser: \x1b[33m${analysis.canRunInBrowserSandbox}\x1b[0m\n`);
           if (analysis.reasoning) writeLog(`  Reasoning: ${analysis.reasoning}\n`);
         } else {
           writeLog(`  Ollama unavailable: ${ollamaResult.reason}\n`);
         }
       }
-
-      // Fallback to local heuristic
       if (!analysis) {
         analysis = analyzeTreeLocally(tree);
         writeLog(`\n\x1b[1;35m▸ Detected: ${analysis.runtime} project\x1b[0m\n`);
-        if (analysis.reasoning) writeLog(`  ${analysis.reasoning}\n`);
       }
-
       analysisRef.current = analysis;
 
-      // ── Decide execution mode ──
+      // ── Decide where it runs ──
       if (analysis.canRunInBrowserSandbox) {
-        // Node.js project — run in WebContainers
         setExecutionMode('webcontainer');
-        setRuntimeInfo({
-          id: 'node',
-          label: 'Node.js',
-          color: '#68a063',
-        });
-        writeLog(`\n\x1b[1;32m✓ This is a Node.js project — running in-browser via WebContainers\x1b[0m\n`);
-      } else {
-        // Non-Node project — needs backend server
-        const currentStatus = await refreshBackendStatus(0);
+        setRuntimeInfo({ id: 'node', label: 'Node.js', color: '#68a063' });
+        writeLog(`\x1b[1;32m✓ Node.js project — running in your browser (WebContainers)\x1b[0m\n`);
+        return await askEnvOrRun(detectEnvVars(tree), analysis, (env) => startWebContainerRun(tree, env));
+      }
 
-        if (!currentStatus.serverOnline) {
-          setErrorMsg(
-            `This is a ${analysis.runtime === 'unknown' ? '' : analysis.runtime + ' '}project. ` +
-            'The backend server is not running. It should auto-start with the dev server. ' +
-            'Try restarting with: npm run dev'
-          );
-          setStage(STAGES.ERROR);
-          writeLog(`\n\x1b[1;31m✗ Backend server is not available.\x1b[0m\n`);
-          return;
+      const status = await refreshBackendStatus(0);
+      const stack = analysis.runtime === 'node' ? 'node' : detectStack(tree).runtime;
+      const plan = planBrowserRun(tree, stack);
+
+      // Static sites are always served in-browser; Python goes to the engine
+      // when there is one (full CPython, any package), otherwise Pyodide.
+      if (plan.kind && (plan.kind === 'static' || !status.serverOnline)) {
+        return await startBrowserRun(plan);
+      }
+
+      if (!status.serverOnline) {
+        if (analysis.runtime === 'node') {
+          // No engine to fall back to — the browser sandbox is the best chance.
+          writeLog(`\x1b[33m⚠ ${analysis.reasoning} No engine is connected, so trying in the browser anyway.\x1b[0m\n`);
+          fellBackRef.current = true;
+          setExecutionMode('webcontainer');
+          setRuntimeInfo({ id: 'node', label: 'Node.js', color: '#68a063' });
+          return await startWebContainerRun(tree, {});
         }
-
-        // Analyze on backend (clone + detect)
-        writeLog(`\n\x1b[1;33m▸ Cloning repository on backend...\x1b[0m\n`);
-        const backendAnalysis = await analyzeRepoBackend({ repoUrl, token });
-        sessionRef.current = backendAnalysis.sessionId;
-        setRuntimeInfo(backendAnalysis.runtime);
-        writeLog(`\x1b[1;32m✓ Detected: ${backendAnalysis.runtime.label}\x1b[0m\n`);
-
-        // Check for env vars
-        const frontendKeys = detectEnvVars(tree);
-        const allKeys = Array.from(new Set([
-          ...frontendKeys,
-          ...(backendAnalysis.envVars || []),
-          ...(analysis.envVarsMentioned || []),
-        ])).filter(isPromptableSecret);
-
-        // Decide: native or Docker?
-        const canNative = backendAnalysis.nativeAvailable;
-        const canDocker = currentStatus.dockerOnline;
-
-        if (canNative) {
-          // Prefer native — no Docker needed!
-          setExecutionMode('native');
-          writeLog(`\n\x1b[1;32m✓ ${backendAnalysis.runtime.label} is installed locally — running natively (no Docker needed)\x1b[0m\n`);
-        } else if (canDocker) {
-          setExecutionMode('docker');
-          writeLog(`\n\x1b[1;33m▸ Running via Docker sandbox...\x1b[0m\n`);
-        } else {
-          // Neither native nor Docker available — use the backend's detected
-          // runtime label (not the coarse frontend heuristic, which is often
-          // "unknown") so the message is accurate.
-          setErrorMsg(`docker_offline:${backendAnalysis.runtime.label}`);
-          setStage(STAGES.ERROR);
-          writeLog(`\n\x1b[1;33m⚠ ${backendAnalysis.runtime.label} is not installed locally and Docker is offline.\x1b[0m\n`);
-          return;
-        }
-
-        if (allKeys.length > 0) {
-          setDetectedKeys(allKeys);
-          setEnvValues(Object.fromEntries(allKeys.map((k) => [k, ''])));
-          setStage(STAGES.NEEDS_ENV);
-          writeLog(`\n\x1b[1;33m⚠ Detected ${allKeys.length} env var(s) — fill them in below, then run.\x1b[0m\n`);
-          return;
-        }
-
-        // No env vars — run directly
-        if (canNative) {
-          await startNativeRun(backendAnalysis.sessionId, {});
-        } else {
-          await startDockerRun(backendAnalysis.sessionId, {});
-        }
+        const label = { go: 'Go', rust: 'Rust', php: 'PHP', ruby: 'Ruby', java: 'Java', dotnet: '.NET', cpp: 'C / C++', docker: 'Docker', python: 'Python' }[stack] || 'This';
+        fail(plan.reason || `${label} projects need the runner engine — a browser tab can't run them.`, 'needs-engine');
         return;
       }
 
-      // ── Handle env vars for WebContainer path ──
-      const keys = detectEnvVars(tree);
-      const mentionedByLLM = analysis?.envVarsMentioned ?? [];
-      const allKeys = Array.from(new Set([...keys, ...mentionedByLLM])).filter(isPromptableSecret);
+      // ── Engine (backend) ──
+      writeLog(`\n\x1b[1;33m▸ Cloning on the runner engine…\x1b[0m\n`);
+      const backendAnalysis = await analyzeRepoBackend({ repoUrl: repoUrlRef.current, token });
+      sessionRef.current = backendAnalysis.sessionId;
+      setRuntimeInfo(backendAnalysis.runtime);
+      writeLog(`\x1b[1;32m✓ Detected: ${backendAnalysis.runtime.label}\x1b[0m\n`);
 
-      if (allKeys.length > 0) {
-        setDetectedKeys(allKeys);
-        setEnvValues(Object.fromEntries(allKeys.map((k) => [k, ''])));
-        setStage(STAGES.NEEDS_ENV);
-        writeLog(`\n\x1b[1;33m⚠ Detected ${allKeys.length} env var(s) — fill them in below, then run.\x1b[0m\n`);
-      } else {
-        await startWebContainerRun(tree, {});
+      const keys = [
+        ...detectEnvVars(tree),
+        ...(backendAnalysis.envVars || []),
+        ...(analysis.envVarsMentioned || []),
+      ];
+
+      if (backendAnalysis.nativeAvailable) {
+        setExecutionMode('native');
+        writeLog(`\x1b[1;32m✓ Running natively on the engine (missing runtimes are installed automatically)\x1b[0m\n`);
+        return await askEnvOrRun(keys, analysis, (env) => startNativeRun(backendAnalysis.sessionId, env));
       }
+      if (status.dockerOnline) {
+        setExecutionMode('docker');
+        return await askEnvOrRun(keys, analysis, (env) => startDockerRun(backendAnalysis.sessionId, env));
+      }
+      fail(`${backendAnalysis.runtime.label} can't run on this engine — it isn't installed and can't be installed automatically here.`);
     } catch (err) {
-      setErrorMsg(err.message);
-      setStage(STAGES.ERROR);
-      writeLog(`\n\x1b[1;31m✗ Error: ${err.message}\x1b[0m\n`);
+      fail(err.message);
     }
+  }
+
+  /** Prompt for secrets the app needs, or run straight away. */
+  async function askEnvOrRun(keys, analysis, run) {
+    const needed = [...new Set([...keys, ...(analysis?.envVarsMentioned || [])])].filter(isPromptableSecret);
+    if (needed.length > 0) {
+      setDetectedKeys(needed);
+      setEnvValues(Object.fromEntries(needed.map((k) => [k, ''])));
+      setStage(STAGES.NEEDS_ENV);
+      writeLog(`\n\x1b[1;33m⚠ This app needs ${needed.length} secret(s) — fill them in to continue.\x1b[0m\n`);
+      pendingRunRef.current = run;
+      return;
+    }
+    await run({});
+  }
+  const pendingRunRef = useRef(null);
+
+  // ─── In-browser runs (no backend): static sites and Python ───
+
+  async function startBrowserRun(plan) {
+    setStage(STAGES.RUNNING);
+    setExecutionMode('browser');
+    setRuntimeInfo({ label: plan.label, color: plan.kind === 'static' ? '#e34f26' : '#3776ab' });
+    writeLog(`\x1b[1;32m✓ ${plan.reason}\x1b[0m\n`);
+
+    const tree = treeRef.current;
+    writeLog(`\n\x1b[1;36m▸ Downloading project files…\x1b[0m\n`);
+    await hydrateAllFiles({ ...repoMetaRef.current, tree, blobs: blobsRef.current, onProgress: (m) => writeLog(`  ${m}\n`) });
+
+    if (plan.kind === 'static') {
+      setExecutionMode('webcontainer');
+      writeLog(`\n\x1b[1;36m▸ Starting an in-browser web server…\x1b[0m\n`);
+      await runStaticSite({
+        tree,
+        onOutput: writeLog,
+        onServerReady: (url) => {
+          setPreviewUrl(url);
+          setStage(STAGES.READY);
+          writeLog(`\n\x1b[1;32m✓ Live!\x1b[0m\n`);
+        },
+      });
+      return;
+    }
+
+    if (plan.kind === 'stlite') {
+      const url = buildStlitePage({ tree, entry: plan.entry });
+      blobUrlRef.current = url;
+      writeLog(`\n\x1b[1;36m▸ Starting ${plan.entry} — Python loads inside the preview (the first run takes ~30s)\x1b[0m\n`);
+      setPhase('start');
+      setPreviewUrl(url);
+      setStage(STAGES.READY);
+      return;
+    }
+
+    // Python script or notebook in a Pyodide worker.
+    const ctl = runPythonInBrowser({
+      tree,
+      entry: plan.entry,
+      mode: plan.kind === 'python-notebook' ? 'notebook' : 'script',
+      onOutput: writeLog,
+      onFigure: (src) => setFigures((f) => [...f, src]),
+      onStatus: (text) => {
+        if (text.startsWith('Running')) {
+          setStage(STAGES.READY);
+          setIsTerminalOpen(true);
+        }
+      },
+      onInputRequest: () => setAwaitingInput(true),
+      onDone: (code) => {
+        setProgramDone(code ?? 0);
+        setAwaitingInput(false);
+        setInputTarget(null);
+        setStage(STAGES.READY);
+        writeLog(`\n\x1b[2m[program exited with code ${code ?? 0}]\x1b[0m\n`);
+      },
+    });
+    pythonRef.current = ctl;
+    setInputTarget((line) => ctl.sendInput(line));
   }
 
   // ─── WebContainer execution (Node.js) ───
@@ -391,10 +482,8 @@ export default function App() {
     setStage(STAGES.RUNNING);
     let becameReady = false;
     try {
-      // Now that we know it's a Node project, download the full file contents
-      // (only the manifests were fetched during analysis).
       if (blobsRef.current && repoMetaRef.current) {
-        writeLog(`\n\x1b[1;36m▸ Downloading project files...\x1b[0m\n`);
+        writeLog(`\n\x1b[1;36m▸ Downloading project files…\x1b[0m\n`);
         await hydrateAllFiles({
           ...repoMetaRef.current,
           tree,
@@ -402,8 +491,8 @@ export default function App() {
           onProgress: (msg) => writeLog(`  ${msg}\n`),
         });
       }
-      writeLog(`\n\x1b[1;36m▸ Booting WebContainer sandbox...\x1b[0m\n`);
-      await runRepo({
+      writeLog(`\n\x1b[1;36m▸ Booting the in-browser Node sandbox…\x1b[0m\n`);
+      const { process: proc } = await runRepo({
         tree,
         envVars,
         analysis: analysisRef.current,
@@ -414,38 +503,40 @@ export default function App() {
           setStage(STAGES.READY);
           writeLog(`\n\x1b[1;32m✓ App is live at ${url}\x1b[0m\n`);
         },
-        // If the in-browser process exits before serving (crash, e.g. a native
-        // module WebContainers can't load), fall back to the native backend.
+        // If the in-browser process exits before serving, fall back to the engine.
         onExit: (code) => {
+          setInputTarget(null);
           if (!becameReady) fallbackToBackend(envVars, `the in-browser run exited (code ${code})`);
         },
       });
+      const writer = proc.input.getWriter();
+      setInputTarget((line) => writer.write(`${line}\n`));
     } catch (err) {
-      // Install/boot failed in-browser — try the backend instead of giving up.
       await fallbackToBackend(envVars, err.message);
     }
   }
 
-  // ─── Automatic fallback: WebContainer failed → run on the native backend ───
+  // ─── Automatic fallback: WebContainer failed → run on the engine ───
   async function fallbackToBackend(envVars, reason) {
-    if (fellBackRef.current) return;
+    if (fellBackRef.current) {
+      fail(`The in-browser run failed: ${reason}`);
+      return;
+    }
     fellBackRef.current = true;
 
     writeLog(`\n\x1b[1;33m⚠ In-browser run didn't work (${reason}).\x1b[0m\n`);
     const status = await refreshBackendStatus(0);
     if (!status.serverOnline) {
-      setErrorMsg(`This repo can't run in the browser and no backend is available. (${reason})`);
-      setStage(STAGES.ERROR);
+      fail(`This repo couldn't run in the browser (${reason}). Connect a runner engine to run it on a real server.`, 'needs-engine');
       return;
     }
 
-    writeLog(`\x1b[1;36m▸ Retrying on the native backend...\x1b[0m\n`);
+    writeLog(`\x1b[1;36m▸ Retrying on the runner engine…\x1b[0m\n`);
     setStage(STAGES.ANALYZING);
     try {
-      const backendAnalysis = await analyzeRepoBackend({ repoUrl, token });
+      const backendAnalysis = await analyzeRepoBackend({ repoUrl: repoUrlRef.current, token });
       sessionRef.current = backendAnalysis.sessionId;
       setRuntimeInfo(backendAnalysis.runtime);
-
       if (backendAnalysis.nativeAvailable) {
         setExecutionMode('native');
         await startNativeRun(backendAnalysis.sessionId, envVars || {});
@@ -453,317 +544,343 @@ export default function App() {
         setExecutionMode('docker');
         await startDockerRun(backendAnalysis.sessionId, envVars || {});
       } else {
-        setErrorMsg(`docker_offline:${backendAnalysis.runtime.label}`);
-        setStage(STAGES.ERROR);
+        fail(`${backendAnalysis.runtime.label} can't run on this engine.`);
       }
     } catch (err) {
-      setErrorMsg(err.message);
-      setStage(STAGES.ERROR);
-      writeLog(`\n\x1b[1;31m✗ ${err.message}\x1b[0m\n`);
+      fail(err.message);
     }
   }
 
-  // ─── Docker execution ───
+  // ─── Engine execution (native or Docker) ───
+
+  function connectEngine(sessionId, { docker = false } = {}) {
+    const conn = connectWebSocket({
+      sessionId,
+      onOutput: writeLog,
+      onStage: (data) => {
+        if (data.stage === 'ready') setStage(STAGES.READY);
+        else if (data.stage === 'building') setStage(STAGES.BUILDING);
+        if (/finished/i.test(data.message || '')) setProgramDone(0);
+        writeLog(`\x1b[1;35m[${data.stage}]\x1b[0m ${data.message}\n`);
+      },
+      onServerReady: (url) => {
+        setPreviewUrl(docker ? getPreviewUrl(sessionId) : url);
+        setStage(STAGES.READY);
+        writeLog(`\n\x1b[1;32m✓ App is live!\x1b[0m\n`);
+      },
+      onError: (msg) => fail(msg),
+    });
+    wsRef.current = conn;
+    setInputTarget((line) => {
+      if (conn.ws.readyState === 1) conn.ws.send(JSON.stringify({ type: 'input', data: `${line}\n` }));
+    });
+    return conn;
+  }
 
   async function startDockerRun(sessionId, envVars) {
     setStage(STAGES.BUILDING);
-    writeLog(`\n\x1b[1;36m▸ Building Docker sandbox...\x1b[0m\n`);
-
-    const wsConnection = connectWebSocket({
-      sessionId,
-      onOutput: writeLog,
-      onStage: (data) => {
-        if (data.stage === 'ready') {
-          setStage(STAGES.READY);
-        } else if (data.stage === 'building') {
-          setStage(STAGES.BUILDING);
-        }
-        writeLog(`\x1b[1;35m[${data.stage}]\x1b[0m ${data.message}\n`);
-      },
-      onServerReady: (url) => {
-        setPreviewUrl(getPreviewUrl(sessionId));
-        setStage(STAGES.READY);
-        writeLog(`\n\x1b[1;32m✓ App is live! Preview available.\x1b[0m\n`);
-      },
-      onError: (msg) => {
-        setErrorMsg(msg);
-        setStage(STAGES.ERROR);
-        writeLog(`\n\x1b[1;31m✗ ${msg}\x1b[0m\n`);
-      },
-    });
-    wsRef.current = wsConnection;
-
+    writeLog(`\n\x1b[1;36m▸ Building Docker sandbox…\x1b[0m\n`);
+    connectEngine(sessionId, { docker: true });
     try {
       await runRepoBackend({ sessionId, envVars });
     } catch (err) {
-      setErrorMsg(err.message);
-      setStage(STAGES.ERROR);
-      writeLog(`\n\x1b[1;31m✗ ${err.message}\x1b[0m\n`);
+      fail(err.message);
     }
   }
 
-  // ─── Native execution (no Docker) ───
-
   async function startNativeRun(sessionId, envVars) {
     setStage(STAGES.BUILDING);
-    writeLog(`\n\x1b[1;36m▸ Setting up native environment...\x1b[0m\n`);
-
-    const wsConnection = connectWebSocket({
-      sessionId,
-      onOutput: writeLog,
-      onStage: (data) => {
-        if (data.stage === 'ready') {
-          setStage(STAGES.READY);
-        } else if (data.stage === 'building') {
-          setStage(STAGES.BUILDING);
-        }
-        writeLog(`\x1b[1;35m[${data.stage}]\x1b[0m ${data.message}\n`);
-      },
-      onServerReady: (url) => {
-        setPreviewUrl(url);
-        setStage(STAGES.READY);
-        writeLog(`\n\x1b[1;32m✓ App is live! Preview available.\x1b[0m\n`);
-      },
-      onError: (msg) => {
-        setErrorMsg(msg);
-        setStage(STAGES.ERROR);
-        writeLog(`\n\x1b[1;31m✗ ${msg}\x1b[0m\n`);
-      },
-    });
-    wsRef.current = wsConnection;
-
+    writeLog(`\n\x1b[1;36m▸ Setting up the environment…\x1b[0m\n`);
+    connectEngine(sessionId);
     try {
-      await runRepoNative({ sessionId, envVars });
+      const result = await runRepoNative({ sessionId, envVars });
+      if (result?.mode === 'native-console') setIsTerminalOpen(true);
     } catch (err) {
-      setErrorMsg(err.message);
-      setStage(STAGES.ERROR);
-      writeLog(`\n\x1b[1;31m✗ ${err.message}\x1b[0m\n`);
+      fail(err.message);
     }
   }
 
   // ─── Env vars submit ───
 
   function handleRunWithEnv() {
-    if (executionMode === 'native' && sessionRef.current) {
-      startNativeRun(sessionRef.current, envValues);
-    } else if (executionMode === 'docker' && sessionRef.current) {
-      startDockerRun(sessionRef.current, envValues);
-    } else {
-      startWebContainerRun(treeRef.current, envValues);
-    }
+    const run = pendingRunRef.current;
+    pendingRunRef.current = null;
+    if (run) run(envValues);
   }
 
   // ─── Stop ───
 
-  async function handleStop() {
-    if (sessionRef.current) {
-      writeLog(`\n\x1b[1;33m▸ Stopping container...\x1b[0m\n`);
-      await stopRepoBackend(sessionRef.current);
-      wsRef.current?.close();
+  async function stopEverything() {
+    pythonRef.current?.stop();
+    pythonRef.current = null;
+    stopActiveRun();
+    if (blobUrlRef.current) {
+      URL.revokeObjectURL(blobUrlRef.current);
+      blobUrlRef.current = null;
     }
+    if (sessionRef.current) {
+      const id = sessionRef.current;
+      sessionRef.current = null;
+      await stopRepoBackend(id).catch(() => {});
+    }
+    wsRef.current?.close();
+    wsRef.current = null;
+  }
+
+  async function handleStop() {
+    if (stage !== STAGES.IDLE) writeLog(`\n\x1b[1;33m▸ Stopping…\x1b[0m\n`);
+    await stopEverything();
+    resetRunState();
     setStage(STAGES.IDLE);
-    setPreviewUrl('');
-    setRuntimeInfo(null);
-    setExecutionMode(null);
   }
 
   const isBusy = [STAGES.FETCHING, STAGES.ANALYZING, STAGES.BUILDING, STAGES.RUNNING].includes(stage);
-  const currentStep = stageToStep(stage);
-  const currentStepIdx = currentStep ? stepIndex(currentStep) : -1;
-  const { progress: progressPct, remainingSec } = useSimulatedProgress(stage, terminalProgress);
+  const currentStep =
+    stage === STAGES.FETCHING ? 'fetch'
+      : stage === STAGES.ANALYZING ? 'detect'
+        : stage === STAGES.BUILDING || stage === STAGES.RUNNING ? (phase || 'install')
+          : stage === STAGES.READY ? 'live'
+            : null;
+  const progress = useStepProgress(currentStep, stage);
+  const elapsed = useElapsed(stage);
+  const isConsole = stage === STAGES.READY && !previewUrl;
+
+  // Console programs live in the terminal — make sure it's visible.
+  useEffect(() => {
+    if (isConsole) setIsTerminalOpen(true);
+  }, [isConsole]);
 
   return (
     <div className="app">
-      <header className="topbar transparent">
+      <header className="topbar">
         {stage !== STAGES.IDLE && (
-          <div className="brand" style={{ cursor: 'pointer' }} onClick={handleStop}>
-            <svg className="github-icon" viewBox="0 0 24 24" width="28" height="28" fill="currentColor">
-              <path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z" />
-            </svg>
-            <div className="brand-text">
-              <span className="brand-git">
-                <span className="brand-g">G</span>
-                <span className="brand-it">IT</span>
-              </span>
-              <span className="brand-live" style={{ paddingRight: '0.2rem' }}>Live</span>
-            </div>
-          </div>
+          <button className="brand" type="button" onClick={handleStop} title="Stop and go back">
+            <GithubIcon size={24} />
+            <span className="brand-text">
+              <span className="brand-git">GIT</span>
+              <span className="brand-live">Live</span>
+            </span>
+          </button>
         )}
+
         <div className="topbar-center">
-          {stage !== STAGES.IDLE && currentStepIdx >= 0 && (
-            <div className="active-step-only">
-              <span className="step-dot active"></span>
-              {PIPELINE_STEPS[currentStepIdx].label}
-              <span className="step-count">{currentStepIdx + 1}/{PIPELINE_STEPS.length}</span>
+          {stage !== STAGES.IDLE && repoName && (
+            <div className="repo-chip">
+              <span className="repo-chip-name">{repoName}</span>
+              {runtimeInfo?.label && (
+                <span className="runtime-tag" style={{ '--tag': runtimeInfo.color || '#8b949e' }}>
+                  {runtimeInfo.label}
+                </span>
+              )}
+              {executionMode && <span className="mode-tag">{MODE_LABELS[executionMode]}</span>}
             </div>
           )}
         </div>
 
         <div className="topbar-right">
           {stage !== STAGES.IDLE && (
-            <button className="btn-stop-global" type="button" onClick={handleStop}>
-              Stop
+            <button className="btn-ghost danger" type="button" onClick={handleStop}>
+              <StopIcon /> Stop
             </button>
           )}
-          <div className={`backend-badge ${dockerOnline ? 'online' : serverOnline ? 'warning' : 'offline'}`}>
+          <div
+            className={`engine-badge ${serverOnline ? 'online' : 'web'}`}
+            title={serverOnline
+              ? `Runner engine connected${dockerOnline ? ' (Docker available)' : ''} — every stack can run.`
+              : 'No runner engine connected — Node, Python, Streamlit, notebooks and static sites run in your browser.'}
+          >
             <span className="badge-dot" />
-            {dockerOnline ? 'Docker Online' : serverOnline ? 'Docker Offline' : 'Server Offline'}
+            {serverOnline ? 'Engine online' : 'Browser mode'}
           </div>
         </div>
       </header>
 
-      <main className={`hero-layout ${stage !== STAGES.IDLE ? 'hidden' : ''}`}>
-        <div className="hero-content">
-          <div className="hero-brand">
-            <svg className="github-icon hero-icon" viewBox="0 0 24 24" width="96" height="96" fill="currentColor">
-              <path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z" />
-            </svg>
-            <div className="brand-text hero-size">
-              <span className="brand-git">
-                <span className="brand-g">G</span>
-                <span className="brand-it">IT</span>
-              </span>
-              <span className="brand-live">Live</span>
+      <main className={`hero ${stage === STAGES.IDLE ? '' : 'hidden'}`}>
+          <div className="hero-content">
+            <div className="hero-brand">
+              <GithubIcon size={84} className="hero-icon" />
+              <div className="brand-text hero-size">
+                <span className="brand-git">
+                  <span className="brand-g">G</span>
+                  <span className="brand-it">IT</span>
+                </span>
+                <span className="brand-live">Live</span>
+              </div>
+            </div>
+            <p className="hero-sub">Paste a GitHub repo — get a running app. No setup.</p>
+
+            <form onSubmit={handleFetchRepo} className="hero-form">
+              <div className="hero-input-group">
+                <input
+                  id="repo-url"
+                  type="text"
+                  inputMode="url"
+                  autoComplete="off"
+                  spellCheck="false"
+                  placeholder="github.com/owner/repo"
+                  value={repoUrl}
+                  onChange={(e) => setRepoUrl(e.target.value)}
+                  required
+                  className="hero-input"
+                />
+                <button className="btn-go" type="submit" disabled={!repoUrl.trim()}>
+                  Go Live <ArrowIcon />
+                </button>
+              </div>
+            </form>
+
+            <div className="examples">
+              <span className="examples-label">Try</span>
+              {EXAMPLES.map((ex) => (
+                <button key={ex.url} type="button" className="example-chip" onClick={() => setRepoUrl(ex.url)}>
+                  {ex.label}
+                </button>
+              ))}
+            </div>
+
+            <div className="stack-groups">
+              <div className="stack-group">
+                <span className="stack-title">Runs in your browser</span>
+                <div className="stack-list">
+                  {IN_BROWSER_STACKS.map((s) => <span key={s} className="stack-pill">{s}</span>)}
+                </div>
+              </div>
+              <div className={`stack-group ${serverOnline ? '' : 'dim'}`}>
+                <span className="stack-title">
+                  With the runner engine {serverOnline ? <em className="ok">· connected</em> : <em>· not connected</em>}
+                </span>
+                <div className="stack-list">
+                  {ENGINE_STACKS.map((s) => <span key={s} className="stack-pill">{s}</span>)}
+                </div>
+              </div>
             </div>
           </div>
-          <form onSubmit={handleFetchRepo} className="hero-form">
-            <div className="hero-input-group">
-              <input
-                id="repo-url"
-                type="url"
-                placeholder="Enter the URL"
-                value={repoUrl}
-                onChange={(e) => setRepoUrl(e.target.value)}
-                disabled={isBusy}
-                required
-                className="hero-input"
-              />
-              <button className="btn-hero-primary" type="submit" disabled={isBusy || !repoUrl}>
-                {isBusy ? <span className="spinner" /> : 'Go Live'}
-              </button>
-            </div>
-          </form>
-          <p className="hero-tagline">Experience A Frictionless Workflow</p>
-        </div>
       </main>
 
-      <main className={`workspace-layout ${stage === STAGES.IDLE ? 'hidden' : ''}`}>
-        
-        {/* Main workspace area (Preview takes over) */}
-        <div className="workspace-main">
-          
-          {previewUrl ? (
-             <iframe
-               key={executionMode === 'webcontainer' ? 'wc' : 'ext'}
-               title="preview"
-               src={previewUrl}
-               className="preview-frame full"
-               {...(executionMode === 'webcontainer' ? {} : { credentialless: '' })}
-               allow="accelerometer; camera; encrypted-media; geolocation; gyroscope; microphone; clipboard-read; clipboard-write"
-             />
-           ) : (
-             <div className="preview-empty full">
-               {isBusy && (
-                 <div className="building-state">
-                   <div className="loading-calligraphy">Preview<span className="dots" /></div>
-                   <div className="progress-track">
-                     <div className="progress-fill" style={{ width: `${progressPct}%` }} />
-                   </div>
-                   <div className="progress-label">
-                     {formatRemaining(remainingSec)}
-                   </div>
-                 </div>
-               )}
-               {stage === STAGES.ERROR && (errorMsg || '').startsWith('docker_offline:') ? (() => {
-                  const runtimeName = errorMsg.split(':')[1];
-                  const isUnknown = !runtimeName || /^unknown$/i.test(runtimeName);
-                  return (
-                    <div className="docker-banner">
-                      <div className="docker-banner-icon">D</div>
-                      <div className="docker-banner-content">
-                        {isUnknown ? (
-                          <>
-                            <h4>Couldn't detect how to run this repo</h4>
-                            <p>No recognized runtime was found. Start Docker Desktop so it can build from a Dockerfile.</p>
-                          </>
-                        ) : (
-                          <>
-                            <h4>{runtimeName} Runtime Not Found</h4>
-                            <p>Install {runtimeName} locally or start Docker Desktop to run in a sandbox.</p>
-                          </>
-                        )}
-                        <button className="btn-check-again" onClick={async () => {
-                          const status = await refreshBackendStatus(0);
-                          if (status.dockerOnline) {
-                            setStage(STAGES.IDLE);
-                            setErrorMsg('');
-                          }
-                        }}>
-                          <span className="refresh-icon">↻</span> Check Again
-                        </button>
-                      </div>
-                    </div>
-                  );
-                })() : stage === STAGES.ERROR ? (
-                  <div className="error-box">{errorMsg}</div>
-                ) : !isBusy && (
-                  <div className="preview-empty-text">
-                    The live preview will appear here once your app starts running.
+      <main className={`workspace ${stage === STAGES.IDLE ? 'hidden' : ''}`}>
+          <section className="stage-area">
+            {previewUrl ? (
+              <div className="browser">
+                <div className="browser-bar">
+                  <span className="browser-dots"><i /><i /><i /></span>
+                  <button className="icon-btn" type="button" title="Reload" onClick={() => setPreviewKey((k) => k + 1)}>
+                    <ReloadIcon />
+                  </button>
+                  <div className="address">
+                    <LockIcon />
+                    <span>{displayUrl(previewUrl, repoName)}</span>
                   </div>
-                )}
-             </div>
-           )}
+                  {!previewUrl.startsWith('blob:') && (
+                    <a className="icon-btn" href={previewUrl} target="_blank" rel="noreferrer" title="Open in a new tab">
+                      <ExternalIcon />
+                    </a>
+                  )}
+                </div>
+                <iframe
+                  key={`${previewUrl}#${previewKey}`}
+                  title="Preview"
+                  src={previewUrl}
+                  className="preview-frame"
+                  {...(executionMode === 'native' || executionMode === 'docker' ? { credentialless: '' } : {})}
+                  allow="accelerometer; camera; encrypted-media; geolocation; gyroscope; microphone; clipboard-read; clipboard-write; cross-origin-isolated"
+                />
+              </div>
+            ) : stage === STAGES.ERROR ? (
+              <ErrorPanel
+                message={errorMsg}
+                kind={errorKind}
+                onRetry={() => handleFetchRepo()}
+                onConnect={async () => {
+                  connectLocalEngine();
+                  const status = await refreshBackendStatus(0);
+                  if (status.serverOnline) handleFetchRepo();
+                  else writeLog('\n\x1b[33mNo engine answered at http://localhost:3001 — is it running?\x1b[0m\n');
+                }}
+                onBack={handleStop}
+              />
+            ) : isConsole ? (
+              <ConsolePanel
+                done={programDone}
+                figures={figures}
+                inputEnabled={inputEnabled}
+                awaitingInput={awaitingInput}
+                onFocusTerminal={() => {
+                  setIsTerminalOpen(true);
+                  termInstance.current?.focus();
+                }}
+              />
+            ) : (
+              <LaunchPanel
+                repoName={repoName}
+                currentStep={currentStep}
+                progress={progress}
+                activity={activity}
+                elapsed={elapsed}
+                paused={stage === STAGES.NEEDS_ENV}
+              />
+            )}
 
-          {/* Environment Variables Modal — over the preview area, terminal stays visible */}
-          {stage === STAGES.NEEDS_ENV && (
-            <div className="modal-overlay">
-              <div className="env-form modal-content">
-                {detectedKeys.map((key) => (
-                  <div className="env-row" key={key}>
-                    <label htmlFor={`env-${key}`}>{key.replace(/_/g, ' ')}</label>
-                    <input
-                      id={`env-${key}`}
-                      type="password"
-                      value={envValues[key] || ''}
-                      onChange={(e) => setEnvValues((prev) => ({ ...prev, [key]: e.target.value }))}
-                      placeholder={`Enter ${key.replace(/_/g, ' ')}…`}
-                    />
-                  </div>
-                ))}
-                <button className="btn-use-this" onClick={handleRunWithEnv}>
-                  Use this
+            {stage === STAGES.NEEDS_ENV && (
+              <div className="modal-overlay">
+                <form
+                  className="modal"
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    handleRunWithEnv();
+                  }}
+                >
+                  <h3>This app needs a few secrets</h3>
+                  <p className="modal-hint">They're only sent to where the app runs. Leave blank to skip.</p>
+                  {detectedKeys.map((key) => (
+                    <label className="env-row" key={key}>
+                      <span>{key}</span>
+                      <input
+                        type="password"
+                        value={envValues[key] || ''}
+                        onChange={(e) => setEnvValues((prev) => ({ ...prev, [key]: e.target.value }))}
+                        placeholder="value"
+                      />
+                    </label>
+                  ))}
+                  <button className="btn-go small" type="submit">Continue <ArrowIcon /></button>
+                </form>
+              </div>
+            )}
+          </section>
+
+          <section className={`terminal-panel ${isTerminalOpen ? 'open' : 'closed'}`}>
+            <div className="terminal-header" onClick={() => setIsTerminalOpen(!isTerminalOpen)}>
+              <div className="terminal-title">
+                <TerminalIcon /> Terminal
+                {inputEnabled && (
+                  <span className={`input-hint ${awaitingInput ? 'waiting' : ''}`}>
+                    {awaitingInput ? 'waiting for input — type and press Enter' : 'input enabled'}
+                  </span>
+                )}
+              </div>
+              <div className="terminal-actions">
+                <button
+                  className="icon-btn"
+                  type="button"
+                  title="Clear"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    termInstance.current?.clear();
+                  }}
+                >
+                  <ClearIcon />
+                </button>
+                <button className="icon-btn" type="button" title={isTerminalOpen ? 'Collapse' : 'Expand'}>
+                  <ChevronIcon up={!isTerminalOpen} />
                 </button>
               </div>
             </div>
-          )}
-        </div>
-
-        {/* Terminal Side Panel (Right) */}
-        <div className={`terminal-side-panel ${isTerminalOpen ? 'open' : 'closed'}`}>
-          <div className="side-header" onClick={() => setIsTerminalOpen(!isTerminalOpen)}>
-            <div className="side-header-content">
-              <div className="window-dots">
-                <span className="window-dot red" />
-                <span className="window-dot yellow" />
-                <span className="window-dot green" />
-              </div>
-              Terminal
+            <div className="terminal-body" onClick={() => termInstance.current?.focus()}>
+              <div className="terminal-wrap" ref={termRef} />
             </div>
-            <div className="side-header-right">
-              <button className="btn-toggle-side">
-                {isTerminalOpen ? '▼' : '▲'}
-              </button>
-            </div>
-          </div>
-          
-          <div className="drawer-content">
-            <div className="terminal-wrap" ref={termRef} />
-          </div>
-        </div>
-
+          </section>
       </main>
 
-      {/* Footer only in idle state */}
       {stage === STAGES.IDLE && (
         <footer className="app-footer">
           <span>GitLive</span>
@@ -777,105 +894,189 @@ export default function App() {
   );
 }
 
-function formatRemaining(sec) {
-  if (sec == null) return 'Estimating time…';
-  if (sec <= 3) return 'Almost done…';
-  if (sec >= 60) {
-    const m = Math.round(sec / 60);
-    return `About ${m} minute${m > 1 ? 's' : ''} remaining`;
-  }
-  const s = Math.max(5, Math.round(sec / 5) * 5);
-  return `About ${s} seconds remaining`;
-}
-
-function statusLabel(stage) {
-  switch (stage) {
-    case STAGES.IDLE: return 'Ready — paste a repo URL to begin';
-    case STAGES.FETCHING: return 'Cloning repository from GitHub…';
-    case STAGES.ANALYZING: return 'Detecting runtime & dependencies…';
-    case STAGES.NEEDS_ENV: return 'Waiting for environment variables';
-    case STAGES.BUILDING: return 'Building sandbox…';
-    case STAGES.RUNNING: return 'Installing dependencies & starting…';
-    case STAGES.READY: return 'App is running';
-    case STAGES.ERROR: return 'Something went wrong';
-    default: return '';
+/** A readable address for the preview bar. */
+function displayUrl(url, repoName) {
+  if (url.startsWith('blob:')) return `${repoName} · running in your browser`;
+  try {
+    const u = new URL(url);
+    if (/webcontainer/.test(u.host)) return `${repoName} · in-browser server`;
+    return `${u.host}${u.pathname === '/' ? '' : u.pathname}`;
+  } catch {
+    return url;
   }
 }
 
-function StatusDot({ stage }) {
-  const cls = {
-    [STAGES.IDLE]: 'dot-idle',
-    [STAGES.FETCHING]: 'dot-busy',
-    [STAGES.ANALYZING]: 'dot-busy',
-    [STAGES.NEEDS_ENV]: 'dot-busy',
-    [STAGES.BUILDING]: 'dot-busy',
-    [STAGES.RUNNING]: 'dot-busy',
-    [STAGES.READY]: 'dot-ready',
-    [STAGES.ERROR]: 'dot-error',
-  }[stage] || 'dot-idle';
-  return <span className={`status-dot ${cls}`} />;
+// ─── Panels ───
+
+function LaunchPanel({ repoName, currentStep, progress, activity, elapsed, paused }) {
+  const activeIdx = STEPS.findIndex((s) => s.key === currentStep);
+  return (
+    <div className="launch">
+      <div className="launch-eyebrow">{paused ? 'Waiting for you' : 'Going live'}</div>
+      <h1 className="launch-title" title={repoName}>{repoName || 'Preparing…'}</h1>
+
+      <ol className="steps">
+        {STEPS.map((step, i) => {
+          const state = i < activeIdx ? 'done' : i === activeIdx ? 'active' : 'todo';
+          return (
+            <li key={step.key} className={`step ${state}`}>
+              <span className="step-marker">{state === 'done' ? <CheckIcon /> : i + 1}</span>
+              <span className="step-label">{step.label}</span>
+            </li>
+          );
+        })}
+      </ol>
+
+      <div className="launch-progress">
+        <div className="bar"><div className="bar-fill" style={{ width: `${progress}%` }} /></div>
+        <div className="launch-meta">
+          <span>{Math.round(progress)}%</span>
+          <span>{formatElapsed(elapsed)}</span>
+        </div>
+      </div>
+
+      <div className="activity" title={activity}>
+        <span className="activity-dot" />
+        <span className="activity-text">{activity || 'Starting…'}</span>
+      </div>
+    </div>
+  );
 }
 
-function getProgressDetails(stage) {
-  switch (stage) {
-    case STAGES.FETCHING: return { percent: 25, eta: '~ 3s' };
-    case STAGES.ANALYZING: return { percent: 45, eta: '~ 2s' };
-    case STAGES.NEEDS_ENV: return { percent: 45, eta: 'Paused' };
-    case STAGES.BUILDING: return { percent: 75, eta: '~ 30s' };
-    case STAGES.RUNNING: return { percent: 95, eta: '~ 10s' };
-    case STAGES.READY: return { percent: 100, eta: 'Done' };
-    default: return { percent: 0, eta: '' };
+function ConsolePanel({ done, figures, inputEnabled, awaitingInput, onFocusTerminal }) {
+  const finished = done !== null && done !== undefined;
+  return (
+    <div className={`console ${figures.length ? 'with-figures' : ''}`}>
+      <div className="console-card">
+        <div className={`console-icon ${finished ? (done === 0 ? 'ok' : 'bad') : 'live'}`}>
+          {finished ? (done === 0 ? <CheckIcon /> : '!') : <TerminalIcon />}
+        </div>
+        <h2>
+          {finished
+            ? done === 0 ? 'Program finished' : `Program exited with code ${done}`
+            : awaitingInput ? 'Waiting for your input' : 'Running in the terminal'}
+        </h2>
+        <p>
+          {finished
+            ? 'This project has no web interface — its output is in the terminal below.'
+            : inputEnabled
+              ? 'This is a console program. Its output streams to the terminal, and you can type there to answer prompts.'
+              : 'This is a console program — its output streams to the terminal below.'}
+        </p>
+        {inputEnabled && !finished && (
+          <button className="btn-ghost" type="button" onClick={onFocusTerminal}>
+            <TerminalIcon /> Type in the terminal
+          </button>
+        )}
+      </div>
+      {figures.length > 0 && (
+        <div className="figures">
+          {figures.map((src, i) => (
+            <figure key={i}>
+              <img src={src} alt={`Figure ${i + 1}`} />
+              <figcaption>Figure {i + 1}</figcaption>
+            </figure>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ErrorPanel({ message, kind, onRetry, onConnect, onBack }) {
+  if (kind === 'needs-engine') {
+    return (
+      <div className="error-panel">
+        <div className="error-icon engine"><ServerIcon /></div>
+        <h2>This repo needs the runner engine</h2>
+        <p className="error-message">{message}</p>
+        <div className="engine-help">
+          <p>
+            In your browser, GitLive runs <strong>Node.js, Python scripts, Streamlit, notebooks</strong> and{' '}
+            <strong>static sites</strong>. Everything else — Java, Go, Rust, C/C++, PHP, Ruby, .NET, and Python
+            web servers (Flask, Django, FastAPI, Gradio) — runs on the engine, which installs each language automatically.
+          </p>
+          <p className="engine-cmd-label">Start the engine on your computer, then connect:</p>
+          <code className="engine-cmd">git clone https://github.com/Amarnath10i/repo-runner && cd repo-runner/backend && npm install && npm start</code>
+        </div>
+        <div className="error-actions">
+          <button className="btn-go small" type="button" onClick={onConnect}>Connect local engine</button>
+          <button className="btn-ghost" type="button" onClick={onBack}>Back</button>
+        </div>
+      </div>
+    );
   }
+  return (
+    <div className="error-panel">
+      <div className="error-icon">!</div>
+      <h2>Couldn't run this repo</h2>
+      <p className="error-message">{message}</p>
+      <p className="error-hint">The terminal below has the full log.</p>
+      <div className="error-actions">
+        <button className="btn-go small" type="button" onClick={onRetry}>Try again</button>
+        <button className="btn-ghost" type="button" onClick={onBack}>Back</button>
+      </div>
+    </div>
+  );
 }
 
-function useSimulatedProgress(stage, terminalProgress) {
+// ─── Hooks ───
+
+/** Progress that creeps within the current step's range. */
+function useStepProgress(step, stage) {
   const [progress, setProgress] = useState(0);
-  const [remainingSec, setRemainingSec] = useState(null);
-  const startRef = useRef(null);
-  const progressRef = useRef(0);
-  const prevStageRef = useRef(STAGES.IDLE);
-
   useEffect(() => {
-    // Start the clock fresh at the beginning of each run.
-    if (stage === STAGES.FETCHING && prevStageRef.current !== STAGES.FETCHING) {
-      startRef.current = Date.now();
-      setRemainingSec(null);
+    if (!step) {
+      setProgress(stage === STAGES.ERROR ? (p) => p : 0);
+      return undefined;
     }
+    const [from, to] = STEP_PROGRESS[step];
+    setProgress((p) => Math.max(p, from));
+    if (from === to) return undefined;
+    const id = setInterval(() => {
+      setProgress((p) => (p < to - 0.5 ? p + (to - p) * 0.03 : p));
+    }, 200);
+    return () => clearInterval(id);
+  }, [step, stage]);
+  return progress;
+}
+
+/** Seconds since the current run started. */
+function useElapsed(stage) {
+  const [elapsed, setElapsed] = useState(0);
+  const startRef = useRef(null);
+  useEffect(() => {
     if (stage === STAGES.IDLE) {
       startRef.current = null;
-      setRemainingSec(null);
+      setElapsed(0);
+      return undefined;
     }
-    prevStageRef.current = stage;
-
-    const details = terminalProgress || getProgressDetails(stage);
-
-    if (stage === STAGES.READY || stage === STAGES.ERROR || stage === STAGES.IDLE) {
-      setProgress(details.percent);
-      progressRef.current = details.percent;
-      if (stage === STAGES.READY) setRemainingSec(0);
-      return;
-    }
-
-    const target = details.percent;
-    const bar = setInterval(() => {
-      setProgress(p => {
-        const diff = target - p;
-        const np = diff > 0.1 ? p + Math.max(0.1, diff * 0.05) : p;
-        progressRef.current = np;
-        return np;
-      });
-    }, 120);
-
-    // Extrapolate remaining time from elapsed time and progress so far.
-    const eta = setInterval(() => {
-      if (!startRef.current) return;
-      const elapsed = (Date.now() - startRef.current) / 1000;
-      const cur = progressRef.current;
-      if (cur > 2) setRemainingSec(Math.max(0, (elapsed * (100 - cur)) / cur));
-    }, 1000);
-
-    return () => { clearInterval(bar); clearInterval(eta); };
-  }, [stage, terminalProgress]);
-
-  return { progress, remainingSec };
+    if (stage === STAGES.FETCHING || !startRef.current) startRef.current = Date.now();
+    if (stage === STAGES.READY || stage === STAGES.ERROR) return undefined;
+    const id = setInterval(() => setElapsed((Date.now() - startRef.current) / 1000), 500);
+    return () => clearInterval(id);
+  }, [stage]);
+  return elapsed;
 }
+
+// ─── Icons ───
+
+function GithubIcon({ size = 24, className = '' }) {
+  return (
+    <svg className={`github-icon ${className}`} viewBox="0 0 24 24" width={size} height={size} fill="currentColor" aria-hidden="true">
+      <path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z" />
+    </svg>
+  );
+}
+
+const svgProps = { width: 16, height: 16, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true };
+const ArrowIcon = () => <svg {...svgProps}><path d="M5 12h14M13 6l6 6-6 6" /></svg>;
+const StopIcon = () => <svg {...svgProps} width={14} height={14}><rect x="6" y="6" width="12" height="12" rx="2" /></svg>;
+const ReloadIcon = () => <svg {...svgProps}><path d="M21 12a9 9 0 1 1-3-6.7L21 8" /><path d="M21 3v5h-5" /></svg>;
+const ExternalIcon = () => <svg {...svgProps}><path d="M14 4h6v6M20 4l-9 9M19 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1h5" /></svg>;
+const LockIcon = () => <svg {...svgProps} width={12} height={12}><rect x="5" y="11" width="14" height="10" rx="2" /><path d="M8 11V7a4 4 0 0 1 8 0v4" /></svg>;
+const CheckIcon = () => <svg {...svgProps} width={14} height={14} strokeWidth={3}><path d="M5 12l5 5L20 7" /></svg>;
+const TerminalIcon = () => <svg {...svgProps} width={14} height={14}><path d="M4 17l6-5-6-5M12 19h8" /></svg>;
+const ClearIcon = () => <svg {...svgProps} width={14} height={14}><path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14" /></svg>;
+const ServerIcon = () => <svg {...svgProps} width={26} height={26}><rect x="3" y="4" width="18" height="7" rx="2" /><rect x="3" y="13" width="18" height="7" rx="2" /><path d="M7 7.5h.01M7 16.5h.01" /></svg>;
+const ChevronIcon = ({ up }) => <svg {...svgProps} width={14} height={14}>{up ? <path d="M6 15l6-6 6 6" /> : <path d="M6 9l6 6 6-6" />}</svg>;
