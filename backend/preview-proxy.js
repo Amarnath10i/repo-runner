@@ -235,3 +235,61 @@ export function createPathProxy({ targetFor, soleSession }) {
 
   return { prefixed, fallback, upgrade };
 }
+
+// ─── API proxy for frontend + backend repos ───
+//
+// A repo's backend usually allows CORS only from the frontend's usual dev
+// origin (localhost:3000, :5173). The preview runs on another port, so the
+// frontend talks to the backend through this proxy instead: it answers
+// preflights itself, allows whatever origin is asking, and drops the Origin
+// header so the backend sees an ordinary same-origin request.
+
+const apiProxy = httpProxy.createProxyServer({ changeOrigin: true, ws: true });
+
+const corsHeaders = (req) => ({
+  'access-control-allow-origin': req.headers.origin || '*',
+  'access-control-allow-credentials': 'true',
+  'access-control-expose-headers': '*',
+  vary: 'Origin',
+});
+
+apiProxy.on('proxyReq', (proxyReq) => proxyReq.removeHeader('origin'));
+apiProxy.on('proxyReqWs', (proxyReq) => proxyReq.removeHeader('origin'));
+apiProxy.on('proxyRes', (proxyRes, req) => {
+  for (const h of Object.keys(proxyRes.headers)) {
+    if (h.startsWith('access-control-')) delete proxyRes.headers[h];
+  }
+  if (req.headers.origin) Object.assign(proxyRes.headers, corsHeaders(req));
+});
+apiProxy.on('error', (err, req, res) => {
+  if (res && typeof res.writeHead === 'function') {
+    if (!res.headersSent) res.writeHead(502, { ...corsHeaders(req), 'Content-Type': 'text/plain' });
+    res.end(`The backend isn't answering (${err.code || err.message}).`);
+  } else {
+    res?.destroy?.();
+  }
+});
+
+/** Serve the backend on `targetPort` at http://127.0.0.1:<listenPort> with CORS for any origin. */
+export function startCorsProxy(listenPort, targetPort) {
+  const server = createServer(async (req, res) => {
+    if (req.method === 'OPTIONS' && req.headers['access-control-request-method']) {
+      res.writeHead(204, {
+        ...corsHeaders(req),
+        'access-control-allow-methods': 'GET, POST, PUT, PATCH, DELETE, OPTIONS, HEAD',
+        'access-control-allow-headers': req.headers['access-control-request-headers'] || '*',
+        'access-control-allow-private-network': 'true',
+        'access-control-max-age': '600',
+      });
+      res.end();
+      return;
+    }
+    apiProxy.web(req, res, { target: await originFor(targetPort) });
+  });
+  server.on('upgrade', async (req, socket, head) => {
+    apiProxy.ws(req, socket, head, { target: await originFor(targetPort) });
+  });
+  return new Promise((resolve, reject) => {
+    server.once('error', reject).listen(listenPort, '127.0.0.1', () => resolve(server));
+  });
+}

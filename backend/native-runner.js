@@ -10,6 +10,7 @@ import {
 } from 'fs';
 import { createConnection } from 'net';
 import { ensureTool, canProvision, ensureDotnetSdk } from './auto-provision.js';
+import { startCorsProxy } from './preview-proxy.js';
 
 // Track active native sessions
 const nativeSessions = new Map();
@@ -31,12 +32,16 @@ const RESERVED_PORTS = new Set([Number(process.env.PORT) || 3001, 5173]);
 const local = (file) => (IS_WIN ? `.\\${file}` : `./${file}`);
 
 
-function getAvailablePort() {
+/**
+ * A port for an app. Skips ports another program already uses — otherwise the
+ * app fails to bind and that program's server would be shown as the preview.
+ */
+async function getAvailablePort() {
   for (let p = PORT_RANGE_START; p < PORT_RANGE_END; p++) {
-    if (!usedPorts.has(p)) {
-      usedPorts.add(p);
-      return p;
-    }
+    if (usedPorts.has(p)) continue;
+    usedPorts.add(p);
+    if (!(await isPortOpen(p))) return p;
+    usedPorts.delete(p);
   }
   throw new Error('No available ports for native process.');
 }
@@ -321,7 +326,7 @@ function createPortObserver({ avoid = [] } = {}) {
  * that respect $PORT), then any port announced in the app's output, then a
  * short list of common hardcoded ports. Gives up early if the process exits.
  */
-async function waitForServer({ hostPort, observedPorts, timeoutMs = 90000, onOutput, exitInfo }) {
+async function waitForServer({ hostPort, observedPorts, timeoutMs = 90000, onOutput, exitInfo, busyBefore = new Set() }) {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
     for (const p of [hostPort, ...observedPorts]) {
@@ -336,13 +341,20 @@ async function waitForServer({ hostPort, observedPorts, timeoutMs = 90000, onOut
     await new Promise((r) => setTimeout(r, 500));
   }
   for (const p of COMMON_APP_PORTS) {
-    if (p === hostPort) continue;
+    // A port that was already taken before the app started is another program's.
+    if (p === hostPort || busyBefore.has(p)) continue;
     if (await isPortOpen(p)) {
       onOutput?.(`\n[info] Detected app on port ${p} — using that for the preview.\n`);
       return p;
     }
   }
   return null;
+}
+
+/** Common app ports already in use (by other programs) before an app starts. */
+async function busyCommonPorts() {
+  const open = await Promise.all(COMMON_APP_PORTS.map((p) => isPortOpen(p)));
+  return new Set(COMMON_APP_PORTS.filter((_, i) => open[i]));
 }
 
 /** After the initial wait, keep polling so a slow server still gets a preview. */
@@ -1126,6 +1138,11 @@ function pythonImportTarget(cwd, relFile) {
   const stem = basename(relFile).replace(/\.py$/, '');
   const src = readFileSafe(join(cwd, relFile)) || '';
   if (!/^\s*from\s+\.+[\w.]*\s+import\s/m.test(src)) {
+    // src/ layout (src/<pkg>/...): import it as <pkg>... with src/ on the path.
+    const parts = relFile.split(/[\\/]/);
+    if (parts[0] === 'src' && parts.length > 2 && existsSync(join(cwd, 'src', parts[1], '__init__.py'))) {
+      return { module: parts.slice(1).join('.').replace(/\.py$/, ''), runCwd: cwd, inPackage: true, extraPath: join(cwd, 'src') };
+    }
     return { module: relFile.replace(/\.py$/, '').replace(/[\\/]/g, '.'), runCwd: cwd, inPackage: false };
   }
   // The package reaches up through every folder that has an __init__.py.
@@ -1136,6 +1153,10 @@ function pythonImportTarget(cwd, relFile) {
     names.unshift(basename(top));
   }
   return { module: [...names, stem].join('.'), runCwd: dirname(top), inPackage: true };
+}
+
+function addPythonPath(processEnv, dir) {
+  if (dir) processEnv.PYTHONPATH = [dir, processEnv.PYTHONPATH].filter(Boolean).join(delimiter);
 }
 
 /**
@@ -1152,6 +1173,7 @@ function buildStartCommand({ runtime, hostPort, processEnv, cwd, prepared = {} }
       processEnv.FLASK_RUN_HOST = '0.0.0.0';
       const appFile = runtime.start?.split(' ').pop() || 'app.py';
       const target = pythonImportTarget(cwd, appFile);
+      addPythonPath(processEnv, target.extraPath);
       // An app with no app.run() / __main__ block exits immediately when run
       // as a script — serve it through `flask run` instead.
       const src = readFileSafe(join(cwd, appFile)) || '';
@@ -1166,6 +1188,7 @@ function buildStartCommand({ runtime, hostPort, processEnv, cwd, prepared = {} }
       const [modulePath, declaredVar] = (runtime.start?.match(/uvicorn\s+(\S+)/)?.[1] || 'main:app').split(':');
       const file = `${modulePath.replace(/\./g, '/')}.py`;
       const target = pythonImportTarget(cwd, file);
+      addPythonPath(processEnv, target.extraPath);
       // An app built by a factory (def create_app(): ...) with no module-level
       // FastAPI instance is served with --factory.
       const src = readFileSafe(join(cwd, file)) || '';
@@ -1190,6 +1213,13 @@ function buildStartCommand({ runtime, hostPort, processEnv, cwd, prepared = {} }
       return { startCmd: PY, startArgs: [runtime.start?.split(' ').pop() || 'app.py'] };
     }
     case 'python-notebook': {
+      // Packages live in PY_SITE (not the interpreter's prefix), so point
+      // JupyterLab at its UI assets, kernels and extensions there.
+      const jupyterData = join(cwd, PY_SITE, 'share', 'jupyter');
+      if (existsSync(jupyterData)) {
+        processEnv.JUPYTERLAB_DIR = join(jupyterData, 'lab');
+        processEnv.JUPYTER_PATH = [jupyterData, processEnv.JUPYTER_PATH].filter(Boolean).join(delimiter);
+      }
       // Config file (not CLI flags) so no quoting is needed for the iframe CSP.
       writeFileSync(join(cwd, '.rr-jupyter-config.py'), [
         "c.ServerApp.token = ''",
@@ -1205,11 +1235,15 @@ function buildStartCommand({ runtime, hostPort, processEnv, cwd, prepared = {} }
       return { startCmd: PY, startArgs: ['-m', 'jupyterlab', '--config=.rr-jupyter-config.py'] };
     }
     case 'python': {
-      const entry = runtime.start?.split(' ').pop() || 'main.py';
+      // The README's own command (python -m pkg.mod --config ...), run from the repo root.
+      const args = runtime.entryArgs || [];
+      if (runtime.entryModule) return { startCmd: PY, startArgs: ['-m', runtime.entryModule, ...args] };
+      const entry = runtime.entryFile || runtime.start?.split(' ').pop() || 'main.py';
       const target = pythonImportTarget(cwd, entry);
+      addPythonPath(processEnv, target.extraPath);
       return target.inPackage
-        ? { startCmd: PY, startArgs: ['-m', target.module], cwd: target.runCwd }
-        : { startCmd: PY, startArgs: [entry] };
+        ? { startCmd: PY, startArgs: ['-m', target.module, ...args], cwd: target.runCwd }
+        : { startCmd: PY, startArgs: [entry, ...args] };
     }
 
     case 'node': {
@@ -1449,7 +1483,7 @@ function createStaticServer(root) {
 }
 
 async function startStaticSite({ sessionId, repoDir, runtime, cwd, onOutput }) {
-  const hostPort = getAvailablePort();
+  const hostPort = await getAvailablePort();
 
   const entry = runtime.entry || 'index.html';
   if (entry !== 'index.html' && !existsSync(join(cwd, 'index.html')) && existsSync(join(cwd, entry))) {
@@ -1495,7 +1529,7 @@ export async function startNativeProcess({ sessionId, repoDir, runtime, envVars,
     return startStaticSite({ sessionId, repoDir, runtime, cwd, onOutput });
   }
 
-  const hostPort = getAvailablePort();
+  const hostPort = await getAvailablePort();
   try {
     writeEnvFile(cwd, envVars, onOutput);
     const processEnv = { ...baseProcessEnv(envVars), PORT: String(hostPort) };
@@ -1518,6 +1552,7 @@ export async function startNativeProcess({ sessionId, repoDir, runtime, envVars,
     onOutput(`\n[start] Starting app on port ${hostPort}...\n`);
     const { startCmd, startArgs, cwd: runCwd } = buildStartCommand({ runtime, hostPort, processEnv, cwd, prepared });
     const observer = createPortObserver({ avoid: runtime.orchestrated?.backendPorts });
+    const busyBefore = await busyCommonPorts();
     let policyBlocked = false;
     const appProcess = spawnApp({
       startCmd, startArgs, cwd: runCwd || cwd, processEnv,
@@ -1549,7 +1584,7 @@ export async function startNativeProcess({ sessionId, repoDir, runtime, envVars,
       : ['python-gradio', 'python-streamlit', 'python-notebook'].includes(runtime.id) ? 240000
       : runtime.id.startsWith('java') || runtime.id === 'dotnet' ? 180000
       : 90000;
-    const readyPort = await waitForServer({ hostPort, observedPorts: observer.ports, timeoutMs, onOutput, exitInfo });
+    const readyPort = await waitForServer({ hostPort, observedPorts: observer.ports, timeoutMs, onOutput, exitInfo, busyBefore });
     if (readyPort) {
       session.hostPort = readyPort;
       onOutput(`\n[ready] App is live on port ${readyPort}!\n`);
@@ -1584,6 +1619,7 @@ export async function startNativeProcess({ sessionId, repoDir, runtime, envVars,
 export async function startCompoundNative({ sessionId, repoDir, services, envVars, onOutput }) {
   const baseEnv = baseProcessEnv(envVars);
   const processes = [];
+  const servers = [];
   const ports = [];
 
   const backend = services.find((s) => s.role === 'backend');
@@ -1592,7 +1628,7 @@ export async function startCompoundNative({ sessionId, repoDir, services, envVar
   // ── Backend first ──
   let apiUrl = '';
   if (backend) {
-    const backendPort = getAvailablePort();
+    const backendPort = await getAvailablePort();
     ports.push(backendPort);
     const cwd = backend.workdir ? join(repoDir, backend.workdir) : repoDir;
     onOutput(`\n[info] Backend: ${backend.runtime.label} in ./${backend.workdir || '.'} → port ${backendPort}\n`);
@@ -1615,11 +1651,20 @@ export async function startCompoundNative({ sessionId, repoDir, services, envVar
     } catch {
       onOutput(`\n[warning] Backend port ${backendPort} not detected — continuing to start the frontend anyway.\n`);
     }
-    apiUrl = `http://127.0.0.1:${backendPort}`;
+    // Through a proxy that allows CORS from the preview's origin (the backend
+    // usually only allows its frontend's usual dev port).
+    const apiPort = await getAvailablePort();
+    ports.push(apiPort);
+    try {
+      servers.push(await startCorsProxy(apiPort, backendPort));
+      apiUrl = `http://127.0.0.1:${apiPort}`;
+    } catch {
+      apiUrl = `http://127.0.0.1:${backendPort}`;
+    }
   }
 
   // ── Frontend, wired to the backend ──
-  const frontPort = getAvailablePort();
+  const frontPort = await getAvailablePort();
   ports.push(frontPort);
   const fcwd = frontend.workdir ? join(repoDir, frontend.workdir) : repoDir;
   const fEnv = { ...baseEnv, PORT: String(frontPort) };
@@ -1637,7 +1682,7 @@ export async function startCompoundNative({ sessionId, repoDir, services, envVar
       stopNativeProcess(sessionId, (msg) => console.log(`[auto-cleanup] ${msg}`));
     }, SESSION_TIMEOUT_MS);
     nativeSessions.set(sessionId, {
-      processes, servers: [server], hostPort: frontPort, ports, runtime: frontend.runtime, repoDir, cleanupTimer, mode: 'native-compound',
+      processes, servers: [...servers, server], hostPort: frontPort, ports, runtime: frontend.runtime, repoDir, cleanupTimer, mode: 'native-compound',
     });
     onOutput(`\n✅ App is live on port ${frontPort}!\n`);
     return { hostPort: frontPort };
@@ -1655,6 +1700,7 @@ export async function startCompoundNative({ sessionId, repoDir, services, envVar
   const { startCmd, startArgs, cwd: fRunCwd } = buildStartCommand({ runtime: frontend.runtime, hostPort: frontPort, processEnv: fEnv, cwd: fcwd, prepared: fPrepared });
   onOutput(`\n[start] Starting frontend...\n`);
   const observer = createPortObserver();
+  const busyBefore = await busyCommonPorts();
   processes.push(spawnApp({
     startCmd, startArgs, cwd: fRunCwd || fcwd, processEnv: fEnv,
     onOutput: (t) => { observer.scan(t); onOutput(t); },
@@ -1666,6 +1712,7 @@ export async function startCompoundNative({ sessionId, repoDir, services, envVar
 
   const session = {
     processes,
+    servers,
     hostPort: frontPort,
     ports,
     runtime: frontend.runtime,
@@ -1675,7 +1722,7 @@ export async function startCompoundNative({ sessionId, repoDir, services, envVar
   };
   nativeSessions.set(sessionId, session);
 
-  const readyPort = await waitForServer({ hostPort: frontPort, observedPorts: observer.ports, timeoutMs: 120000, onOutput });
+  const readyPort = await waitForServer({ hostPort: frontPort, observedPorts: observer.ports, timeoutMs: 120000, onOutput, busyBefore });
   if (readyPort) {
     session.hostPort = readyPort; // preview port; `ports` keeps the allocated ones for release
     onOutput(`\n✅ App is live on port ${readyPort}!\n`);

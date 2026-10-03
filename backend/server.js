@@ -82,6 +82,9 @@ app.use('/api', express.json());
 // Track WebSocket clients per session
 const wsClients = new Map(); // sessionId -> Set<ws>
 
+const ORPHAN_GRACE_MS = 2 * 60 * 1000;
+const orphanTimers = new Map(); // sessionId → timer that stops a run nobody watches
+
 wss.on('connection', (ws, req) => {
   const url = new URL(req.url, `http://localhost:${PORT}`);
   const sessionId = url.searchParams.get('session');
@@ -95,12 +98,22 @@ wss.on('connection', (ws, req) => {
     wsClients.set(sessionId, new Set());
   }
   wsClients.get(sessionId).add(ws);
+  clearTimeout(orphanTimers.get(sessionId));
+  orphanTimers.delete(sessionId);
 
   ws.on('close', () => {
     const clients = wsClients.get(sessionId);
     if (clients) {
       clients.delete(ws);
-      if (clients.size === 0) wsClients.delete(sessionId);
+      if (clients.size === 0) {
+        wsClients.delete(sessionId);
+        // Nobody is watching this run any more (tab closed): stop it after a
+        // grace period that covers a page reload.
+        orphanTimers.set(sessionId, setTimeout(() => {
+          orphanTimers.delete(sessionId);
+          if (!wsClients.has(sessionId)) stopSession(sessionId).catch(() => {});
+        }, ORPHAN_GRACE_MS));
+      }
     }
   });
 
@@ -440,22 +453,17 @@ app.post('/api/run-native', async (req, res) => {
  * POST /api/stop/:sessionId
  * Stop a running sandbox.
  */
+async function stopSession(sessionId) {
+  closePortProxy(sessionId);
+  const log = (msg) => broadcast(sessionId, { type: 'output', text: msg });
+  // Check if it's a native session first
+  if (getNativeSession(sessionId)) await stopNativeProcess(sessionId, log);
+  else await stopSandbox(sessionId, log);
+}
+
 app.post('/api/stop/:sessionId', async (req, res) => {
   const { sessionId } = req.params;
-
-  closePortProxy(sessionId);
-
-  // Check if it's a native session first
-  const nativeSession = getNativeSession(sessionId);
-  if (nativeSession) {
-    await stopNativeProcess(sessionId, (msg) => {
-      broadcast(sessionId, { type: 'output', text: msg });
-    });
-  } else {
-    await stopSandbox(sessionId, (msg) => {
-      broadcast(sessionId, { type: 'output', text: msg });
-    });
-  }
+  await stopSession(sessionId);
 
   // Clean up repo files
   const repoDir = join(REPOS_DIR, sessionId);
