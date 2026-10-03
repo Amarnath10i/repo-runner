@@ -159,8 +159,15 @@ export default function App() {
 
   useEffect(() => {
     // A deployed UI has no local dev server racing to start, so don't retry.
-    refreshBackendStatus(BACKEND_IS_LOCAL && import.meta.env.DEV ? 3 : 0);
-    const interval = setInterval(() => refreshBackendStatus(0), 15000);
+    let online = false;
+    let ticks = 0;
+    refreshBackendStatus(BACKEND_IS_LOCAL && import.meta.env.DEV ? 3 : 0).then((s) => { online = s.serverOnline; });
+    // Poll often while the engine is up; an unreachable one only every 2 minutes
+    // (runs re-check it themselves before they need it).
+    const interval = setInterval(async () => {
+      if (!online && ++ticks % 8) return;
+      online = (await refreshBackendStatus(0)).serverOnline;
+    }, 15000);
     return () => clearInterval(interval);
   }, [refreshBackendStatus]);
 
@@ -562,11 +569,17 @@ export default function App() {
           setStage(STAGES.READY);
           writeLog(`\n\x1b[1;32m✓ App is live!\x1b[0m\n`);
         },
+        onNoServer: () => {
+          stopActiveRun();
+          fail('This repo built successfully, but its dev command only rebuilds on file changes — it serves no web page (it looks like a library, not an app). The build output is in the terminal.');
+        },
         // If the in-browser process exits before serving, fall back to the engine.
         onExit: (code) => {
           setInputTarget(null);
           if (!becameReady) {
-            fallbackToBackend(envVars, `the in-browser run exited (code ${code})`);
+            fallbackToBackend(envVars, code === 0
+              ? 'its start command finished without opening a web server — it may be a library or build tool rather than an app'
+              : `its start command failed with exit code ${code} — the terminal shows the error`);
           } else {
             // A dev server never exits on its own: it listened, then stopped
             // (e.g. Next.js failing to load its compiler exits with 0).
