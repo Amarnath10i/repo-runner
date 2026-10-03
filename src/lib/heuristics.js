@@ -89,7 +89,10 @@ export function analyzeTreeLocally(tree) {
   // when connected, runs the whole thing (see otherServices).
   const rootPkg = tree['package.json']?.file ? readPackageJsonAt(tree, '') : null;
   const rootScript = pickStartScript(rootPkg);
-  if (rootScript && stack.runtime !== 'unknown') {
+  // Laravel, Django and Rails keep a package.json just to build their CSS/JS
+  // (Vite, webpack) — the app itself is the PHP/Python/Ruby server.
+  const serverFramework = tree.artisan?.file || tree['manage.py']?.file || tree.bin?.directory?.rails?.file;
+  if (rootScript && stack.runtime !== 'unknown' && !serverFramework) {
     const manager = detectPackageManager(tree, '');
     const blocker = treeWebContainerBlocker(tree);
     return {
