@@ -6,7 +6,7 @@ import { parseGithubUrl, fetchRepoTree, hydrateAllFiles, detectEnvVars, GitHubNe
 import { runRepo, stopActiveRun } from './lib/runner.js';
 import { runStaticSite } from './lib/static-runner.js';
 import { runPythonInBrowser, buildStlitePage } from './lib/python-runner.js';
-import { planBrowserRun } from './lib/browser-plan.js';
+import { planBrowserRun, notebookWithCode } from './lib/browser-plan.js';
 import { analyzeRepo, checkOllamaAvailable } from './lib/ollama.js';
 import { analyzeTreeLocally, detectStack, isPromptableSecret, treeWebContainerBlocker } from './lib/heuristics.js';
 import {
@@ -505,9 +505,10 @@ export default function App() {
     }
 
     // Python script or notebook in a Pyodide worker.
+    const entry = plan.kind === 'python-notebook' ? notebookWithCode(tree, plan.entry) : plan.entry;
     const ctl = runPythonInBrowser({
       tree,
-      entry: plan.entry,
+      entry,
       mode: plan.kind === 'python-notebook' ? 'notebook' : 'script',
       hfBridge: !!plan.hfBridge,
       onOutput: writeLog,

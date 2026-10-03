@@ -56,6 +56,18 @@ const PY_HEAVY_ML_IMPORT = /^\s*(?:import|from)\s+(torch|tensorflow|keras|jax|tr
  * direct PyTorch/TensorFlow/model-class code or UI server? Those calls can be
  * served by Transformers.js in the browser.
  */
+/**
+ * Once every file is downloaded: the planned notebook if it has code, else the
+ * first notebook that does (chapter intros and tables of contents are prose only).
+ */
+export function notebookWithCode(tree, planned) {
+  if (codeCells(readText(tree, planned)).trim()) return planned;
+  const notebooks = listFiles(tree)
+    .filter((f) => f.endsWith('.ipynb') && !f.includes('.ipynb_checkpoints'))
+    .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+  return notebooks.find((f) => codeCells(readText(tree, f)).trim()) || planned;
+}
+
 export function usesOnlyHfPipelines(code) {
   if (!/^\s*from\s+transformers\s+import\s+\(?\s*pipeline\s*\)?\s*$/m.test(code) && !/\btransformers\.pipeline\s*\(/.test(code)) return false;
   if (/^\s*from\s+transformers\s+import\s+(?!\(?\s*pipeline\s*\)?\s*$)/m.test(code)) return false; // AutoModel, Trainer, …
