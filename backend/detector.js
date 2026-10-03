@@ -166,7 +166,7 @@ const RUNTIME_CONFIGS = [
     color: '#3776ab',
     detect: (dir) => pythonDeclares(dir, 'flask'),
     getCommands: (dir) => {
-      const appFile = findPythonEntry(dir, ['app.py', 'main.py', 'server.py', 'run.py']);
+      const appFile = findFlaskApp(dir) || findPythonEntry(dir, ['app.py', 'main.py', 'server.py', 'run.py']);
       return {
         install: 'pip install -r requirements.txt',
         start: `python ${appFile}`,
@@ -1007,6 +1007,33 @@ function pythonDeclares(dir, pkg) {
   return PYTHON_MANIFESTS.concat('setup.cfg').some((f) => re.test(readFileSafe(join(dir, f)) || ''));
 }
 
+/**
+ * A Flask app's file: FLASK_APP (.flaskenv / .env), the Procfile's web
+ * command (gunicorn module:app), or a root file that creates the app.
+ */
+function findFlaskApp(dir) {
+  const asFile = (mod) => {
+    const f = mod.replace(/[:(].*$/, '').replace(/\.py$/, '').replace(/\./g, '/');
+    if (existsSync(join(dir, `${f}.py`))) return `${f}.py`;
+    if (existsSync(join(dir, f, '__init__.py'))) return `${f}/__init__.py`;
+    return null;
+  };
+  for (const envFile of ['.flaskenv', '.env', '.env.example']) {
+    const m = (readFileSafe(join(dir, envFile)) || '').match(/^\s*FLASK_APP\s*=\s*['"]?([\w./:()-]+)/m);
+    const f = m && asFile(m[1]);
+    if (f) return f;
+  }
+  const web = (readFileSafe(join(dir, 'Procfile')) || '').match(/^web:.*?\b(?:gunicorn|waitress-serve)\b.*?\s([\w.]+):\w+/m);
+  const fromProcfile = web && asFile(web[1]);
+  if (fromProcfile) return fromProcfile;
+  try {
+    return readdirSync(dir).find((f) => f.endsWith('.py') && !/^tests?(_\w+)?\.py$|_test\.py$/.test(f)
+      && /\bFlask\(|\bcreate_app\(/.test(readFileSafe(join(dir, f)) || '')) || null;
+  } catch {
+    return null;
+  }
+}
+
 function findFastApiApp(dir) {
   const isApp = (f) => /=\s*FastAPI\(/.test(readFileSafe(join(dir, f)) || '');
   for (const f of ['main.py', 'app.py', 'server.py', 'app/main.py', 'src/main.py', 'api/main.py', 'backend/main.py']) {
@@ -1131,7 +1158,7 @@ function findPythonEntry(dir, candidates) {
   // and never packaging/test helpers like setup.py or conftest.py.
   try {
     const files = readdirSync(dir).filter(
-      (f) => f.endsWith('.py') && !/^(setup|conftest|__init__)\.py$|^test_/.test(f)
+      (f) => f.endsWith('.py') && !/^(setup|conftest|__init__|tests?)\.py$|^test_|_test\.py$/.test(f)
     );
     const withMain = files.find((f) => /__name__\s*==\s*['"]__main__['"]/.test(readFileSafe(join(dir, f)) || ''));
     if (withMain || files.length > 0) return withMain || files[0];
