@@ -45,7 +45,7 @@ open-source use; a commercial, for-profit deployment needs a
 CMake preinstalled; Go, Java, Rust, Bun and Deno are downloaded on first use.
 It runs as the non-root `node` user (uid 1000).
 
-**Hugging Face Spaces (free: 2 vCPU, 16 GB RAM; sleeps after ~48 h idle):**
+**Hugging Face Spaces (Docker Spaces need a PRO subscription; 2 vCPU, 16 GB RAM):**
 `backend/README.md` carries the Space config (`sdk: docker`, `app_port: 3001`),
 so the folder uploads as-is. With a write token from
 https://huggingface.co/settings/tokens:
