@@ -20,6 +20,15 @@ COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 COPY . .
 
-ENV NODE_ENV=production
+# BUNDLE_PATH: gems go inside each cloned repo, so bundle install needs no root.
+ENV NODE_ENV=production \
+    HOME=/home/node \
+    BUNDLE_PATH=vendor/bundle
+
+# Run as the image's non-root user (uid 1000), as Hugging Face Spaces require.
+# Clones and downloaded toolchains are written under /app.
+RUN mkdir -p .repos .runtimes && chown -R node:node /app
+USER node
+
 EXPOSE 3001
 CMD ["node", "server.js"]

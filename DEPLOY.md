@@ -39,10 +39,26 @@ WebContainers (the in-browser Node runtime) are free for personal and
 open-source use; a commercial, for-profit deployment needs a
 [StackBlitz license](https://webcontainers.io/enterprise).
 
-## Engine → Railway / Render / Fly
+## Engine → Hugging Face Spaces / Railway / Render / Fly
 
 `backend/Dockerfile` builds an image with Python, PHP + Composer, Ruby, GCC and
 CMake preinstalled; Go, Java, Rust, Bun and Deno are downloaded on first use.
+It runs as the non-root `node` user (uid 1000).
+
+**Hugging Face Spaces (free: 2 vCPU, 16 GB RAM; sleeps after ~48 h idle):**
+`backend/README.md` carries the Space config (`sdk: docker`, `app_port: 3001`),
+so the folder uploads as-is. With a write token from
+https://huggingface.co/settings/tokens:
+
+```bash
+hf auth login
+hf repos create <you>/gitlive-engine --type space --space-sdk docker
+hf upload <you>/gitlive-engine backend . --repo-type space \
+  --exclude "node_modules/*" ".repos/*" ".runtimes/*"
+```
+
+The engine's URL is `https://<you>-gitlive-engine.hf.space`. Downloaded
+toolchains and clones are lost when the Space restarts.
 
 **Railway (CLI, ~2 minutes):**
 
@@ -67,7 +83,8 @@ Then set `VITE_BACKEND_URL` on Vercel to the engine's public URL and redeploy.
 
 Previews from a deployed engine are served under
 `https://<engine>/preview/<session>/` on the same port. Mount a volume at
-`/app/.runtimes` to keep downloaded toolchains between deploys.
+`/app/.runtimes` to keep downloaded toolchains between deploys (on Railway, set
+`RAILWAY_RUN_UID=0` so the non-root container can write to it).
 
 ## Local engine
 
