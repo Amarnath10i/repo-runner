@@ -4,6 +4,11 @@
 import { readFileSync, existsSync, readdirSync } from 'fs';
 import { join } from 'path';
 
+const PYTHON_MANIFESTS = ['requirements.txt', 'pyproject.toml', 'Pipfile', 'environment.yml', 'setup.py'];
+const OTHER_ROOT_MANIFESTS = [
+  'Cargo.toml', 'go.mod', 'pom.xml', 'build.gradle', 'build.gradle.kts', 'Gemfile', 'composer.json', 'CMakeLists.txt',
+];
+
 const RUNTIME_CONFIGS = [
   {
     id: 'docker-compose',
@@ -157,10 +162,7 @@ const RUNTIME_CONFIGS = [
     label: 'Flask',
     icon: '🐍',
     color: '#3776ab',
-    detect: (dir) => {
-      const req = readFileSafe(join(dir, 'requirements.txt'));
-      return req?.toLowerCase().includes('flask') || false;
-    },
+    detect: (dir) => pythonDeclares(dir, 'flask'),
     getCommands: (dir) => {
       const appFile = findPythonEntry(dir, ['app.py', 'main.py', 'server.py', 'run.py']);
       return {
@@ -175,10 +177,7 @@ const RUNTIME_CONFIGS = [
     label: 'FastAPI',
     icon: '⚡',
     color: '#009688',
-    detect: (dir) => {
-      const req = readFileSafe(join(dir, 'requirements.txt'));
-      return req?.toLowerCase().includes('fastapi') || false;
-    },
+    detect: (dir) => pythonDeclares(dir, 'fastapi'),
     getCommands: (dir) => {
       const appFile = findFastApiApp(dir) || findPythonEntry(dir, ['main.py', 'app.py', 'server.py']);
       const moduleName = appFile.replace(/\.py$/, '').replace(/\//g, '.');
@@ -231,6 +230,11 @@ const RUNTIME_CONFIGS = [
     icon: '🐍',
     color: '#3776ab',
     detect: (dir) => {
+      // A Rust/Go/Java/... repo with helper scripts in docs/ or tools/ isn't a
+      // Python project: only count Python files at the root then.
+      if (OTHER_ROOT_MANIFESTS.some((f) => existsSync(join(dir, f)))) {
+        return PYTHON_MANIFESTS.some((f) => existsSync(join(dir, f))) || readdirSync(dir).some((f) => f.endsWith('.py'));
+      }
       if (
         findFileRecursive(dir, 'requirements.txt') ||
         findFileRecursive(dir, 'pyproject.toml') ||
@@ -238,7 +242,7 @@ const RUNTIME_CONFIGS = [
         findFileRecursive(dir, 'environment.yml') ||
         findFileRecursive(dir, 'setup.py')
       ) return true;
-      return findFileRecursive(dir, '.py', true) !== null;
+      return listPyFiles(dir).length > 0;
     },
     getCommands: (dir) => {
       const installCmd = findFileRecursive(dir, 'requirements.txt')
@@ -248,7 +252,20 @@ const RUNTIME_CONFIGS = [
           : findFileRecursive(dir, 'Pipfile')
             ? 'pip install pipenv && pipenv install'
             : 'pip install .';
-      const appFile = findPythonEntry(dir, ['app.py', 'main.py', 'run.py', 'server.py', 'manage.py']);
+      const rootEntries = ['app.py', 'main.py', 'run.py', 'server.py', 'manage.py'];
+      // No obvious entry file: run what the README says to run.
+      const fromReadme = !rootEntries.some((f) => existsSync(join(dir, f))) && readmePythonCommand(dir);
+      if (fromReadme) {
+        return {
+          install: installCmd,
+          start: fromReadme.start,
+          entryFile: fromReadme.file,
+          entryModule: fromReadme.module,
+          entryArgs: fromReadme.args,
+          dockerfile: null,
+        };
+      }
+      const appFile = findPythonEntry(dir, rootEntries);
       return {
         install: installCmd,
         start: `python ${appFile}`,
@@ -953,11 +970,68 @@ function findDotnetProject(dir) {
 }
 
 /** The .py file that creates the FastAPI app, if any. */
-function findFastApiApp(dir) {
-  for (const f of ['main.py', 'app.py', 'server.py', 'app/main.py', 'src/main.py', 'api/main.py', 'backend/main.py']) {
-    if (/=\s*FastAPI\(/.test(readFileSafe(join(dir, f)) || '')) return f;
+/**
+ * The first `python file.py ...` / `python -m pkg.mod ...` command in the
+ * README whose target and file arguments exist in the repo — the author's own
+ * way to run it. Returns { file | module, args, start } or null.
+ */
+function readmePythonCommand(dir) {
+  const readme = ['README.md', 'readme.md', 'README.rst', 'README.txt', 'README']
+    .map((f) => readFileSafe(join(dir, f)))
+    .find(Boolean);
+  if (!readme) return null;
+  const re = /^\s*(?:\$\s*)?(?:uv run\s+)?python3?\s+(-m\s+)?([\w./-]+)([^\n`|&;#]*)$/gm;
+  let m;
+  while ((m = re.exec(readme))) {
+    const [line, isModule, target, rest] = m;
+    const args = rest.trim().split(/\s+/).filter(Boolean);
+    // Placeholders (<path>, {name}, ...) or paths the repo doesn't ship.
+    if (args.some((a) => /[<>{}$]|\.\.\./.test(a))) continue;
+    if (args.some((a) => !a.startsWith('-') && /[/\\]|\.\w{1,5}$/.test(a) && !existsSync(join(dir, a)))) continue;
+    if (isModule) {
+      const p = target.replace(/\./g, '/');
+      const exists = [`${p}.py`, `${p}/__main__.py`, `src/${p}.py`, `src/${p}/__main__.py`].some((f) => existsSync(join(dir, f)));
+      if (exists) return { module: target, args, start: line.trim() };
+    } else if (target.endsWith('.py') && existsSync(join(dir, target)) && !/(^|\/)(setup|test_\w*)\.py$/.test(target)) {
+      return { file: target, args, start: line.trim() };
+    }
   }
   return null;
+}
+
+/** Does a Python project's manifest (requirements, pyproject, Pipfile, setup) list this package? */
+function pythonDeclares(dir, pkg) {
+  const re = new RegExp(String.raw`(^|[\s"'\[,])${pkg}([\s"'<>=~!;\[\],]|$)`, 'im');
+  return PYTHON_MANIFESTS.concat('setup.cfg').some((f) => re.test(readFileSafe(join(dir, f)) || ''));
+}
+
+function findFastApiApp(dir) {
+  const isApp = (f) => /=\s*FastAPI\(/.test(readFileSafe(join(dir, f)) || '');
+  for (const f of ['main.py', 'app.py', 'server.py', 'app/main.py', 'src/main.py', 'api/main.py', 'backend/main.py']) {
+    if (isApp(f)) return f;
+  }
+  // Anywhere else (src/<pkg>/api/app.py...), preferring the usual entry names.
+  const found = listPyFiles(dir).filter(isApp);
+  return found.find((f) => /(^|\/)(main|app|server|api)\.py$/.test(f)) || found[0] || null;
+}
+
+/** .py files under dir (relative paths), skipping tests, migrations, docs and installs. */
+function listPyFiles(dir, depth = 0, rel = '', out = []) {
+  let items;
+  try {
+    items = readdirSync(join(dir, rel), { withFileTypes: true });
+  } catch {
+    return out;
+  }
+  for (const it of items) {
+    const path = rel ? `${rel}/${it.name}` : it.name;
+    if (it.isDirectory()) {
+      if (depth < 5 && !SKIP_DIRS.has(it.name) && !PY_NON_ENTRY_DIRS.has(it.name) && !it.name.startsWith('.')) listPyFiles(dir, depth + 1, path, out);
+    } else if (it.name.endsWith('.py')) {
+      out.push(path);
+    }
+  }
+  return out;
 }
 
 /** JSON with comments (deno.jsonc, tsconfig-style). */
@@ -1063,11 +1137,26 @@ function findPythonEntry(dir, candidates) {
     // ignore
   }
   // Fallback: look recursively for ANY .py file
-  const recursivePy = findFileRecursive(dir, '.py', true);
+  // Rank the rest: a __main__ block and entry-like names (main, app, run_*,
+  // demo) win; shallower files beat deeper ones.
+  const score = (f) => {
+    const name = f.split('/').pop();
+    let s = -f.split('/').length;
+    if (/__name__\s*==\s*['"]__main__['"]/.test(readFileSafe(join(dir, f)) || '')) s += 3;
+    if (/^(main|app|run|demo|serve|server|start|cli|train|simulate)\b|^(run|demo)_/.test(name)) s += 2;
+    return s;
+  };
+  const recursivePy = listPyFiles(dir)
+    .filter((f) => !/(^|\/)(__init__|__main__|setup|conftest|test_\w*|\w+_test)\.py$/.test(f))
+    .map((f) => [f, score(f)])
+    .sort((a, b) => b[1] - a[1])[0]?.[0];
   if (recursivePy) return recursivePy;
   
   return 'main.py';
 }
+
+// Folders whose scripts are never an app's entry point (Alembic's env.py, tests, docs helpers).
+const PY_NON_ENTRY_DIRS = new Set(['migrations', 'alembic', 'tests', 'test', 'docs', 'benchmarks']);
 
 const SKIP_DIRS = new Set([
   'node_modules', '.git', 'dist', 'build', '.next',
