@@ -21,6 +21,32 @@ export function stopActiveRun() {
   activeRun = { processes: [], unsubscribe: null };
 }
 
+/**
+ * Dev servers (Next.js, TanStack Start, Vite SSR) say they're ready as soon as
+ * they listen, but compile the first page only when it's requested — which
+ * can take a minute in the sandbox. Request it (no-cors: the preview is another
+ * origin) and resolve once it answers, so the preview never opens blank.
+ */
+export async function waitUntilResponds(url, { timeoutMs = 300000, onWaiting } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  let notified = false;
+  while (Date.now() < deadline) {
+    const started = Date.now();
+    try {
+      await fetch(url, { mode: 'no-cors', cache: 'no-store', signal: AbortSignal.timeout(180000) });
+      return true;
+    } catch {
+      // still compiling, or not reachable yet
+    }
+    if (!notified && Date.now() - started < 1000) {
+      notified = true;
+      onWaiting?.();
+    }
+    await new Promise((r) => setTimeout(r, 2000));
+  }
+  return false;
+}
+
 /** Empty the container's filesystem so a new repo doesn't mix with the last one. */
 export async function clearContainerFs(container) {
   for (const name of await container.fs.readdir('.')) {
@@ -121,7 +147,9 @@ export async function runRepo({ tree, envVars, analysis, onOutput, onServerReady
   if (hasNext) await pinNextForBrowser(container, workdir, onOutput);
   await upgradeOldEsbuild(container, workdir, onOutput);
   await installDependencies(container, installArgv, workdir, onOutput);
-  if (hasNext) await patchNextScripts(container, workdir, onOutput);
+  if (hasNext) {
+    await patchNextScripts(container, workdir, onOutput);
+  }
   await shimNativeSqlite(container, workdir, onOutput);
 
   const startScript = pickStartScript(pkg);
@@ -144,7 +172,23 @@ export async function runRepo({ tree, envVars, analysis, onOutput, onServerReady
 
   onOutput(`Starting the app (${startArgv.join(' ')})...\n`);
 
-  trackRun({ unsubscribe: container.on('server-ready', (port, url) => onServerReady(url, port)) });
+  // SSR frameworks listen first and compile the page on its first request,
+  // which takes a while in the sandbox. Request it in the background and open
+  // the preview once the dev server reports the compile (or after 4 minutes).
+  const deps = { ...(pkg?.dependencies || {}), ...(pkg?.devDependencies || {}) };
+  const compilesOnRequest = ['next', 'nuxt', '@sveltejs/kit', '@remix-run/dev', '@tanstack/react-start', '@tanstack/start', 'astro'].some((d) => deps[d]);
+  let markCompiled;
+  const compiled = new Promise((r) => { markCompiled = r; });
+  trackRun({
+    unsubscribe: container.on('server-ready', async (port, url) => {
+      if (compilesOnRequest) {
+        onOutput('\nServer is listening — compiling the first page…\n');
+        fetch(url, { mode: 'no-cors', cache: 'no-store' }).catch(() => {});
+        await Promise.race([compiled, new Promise((r) => setTimeout(r, 240000))]);
+      }
+      onServerReady(url, port);
+    }),
+  });
 
   // If the repo crashes immediately (e.g. Next.js/Turbopack WASM limitations),
   // surface a clearer error instead of leaving the user with a dead terminal.
@@ -162,6 +206,8 @@ export async function runRepo({ tree, envVars, analysis, onOutput, onServerReady
   let crashTimer = null;
   pipeToOutput(run, (text) => {
     onOutput(text);
+    // "✓ Compiled / in 12s" (Next), "GET / 200" (most dev servers' request log)
+    if (/Compiled\s+\S*\s*in\s|compiled successfully|GET \/\S* 200|\bready in\b.*\n?.*Local/i.test(text.replace(/\x1b\[[0-9;]*m/g, ''))) markCompiled();
     if (!crashTimer && CRASH_MARKERS.test(text)) {
       crashTimer = setTimeout(() => end(1), 4000);
     }
@@ -433,17 +479,14 @@ async function installDependencies(container, argv, workdir, onOutput) {
   throw new Error(`Installing dependencies failed (exit code ${code}).`);
 }
 
-// Next.js 15.5+ fails inside WebContainers ("Expected workStore to be
-// initialized", vercel/next.js#84026); 15.4 is the newest release that works.
+// In WebContainers, Next.js 15.5+ fails ("Expected workStore to be initialized",
+// vercel/next.js#84026) and Next 13/14 can't load their compiler ("Failed to
+// load SWC binary"). 15.4 works, and still runs 13/14-era app code.
 const NEXT_BROWSER_VERSION = '15.4.11';
 
-/** Does a dependency range ask for Next 15.5 or newer ("latest", "^16", "15.5.2")? */
-function needsOlderNext(range) {
-  if (!range || /latest|canary|rc/.test(range)) return !!range;
-  const m = range.match(/(\d+)(?:\.(\d+))?/);
-  if (!m) return false;
-  const [major, minor] = [Number(m[1]), Number(m[2] || 0)];
-  return major > 15 || (major === 15 && minor >= 5);
+/** Should the browser sandbox swap this Next.js version for NEXT_BROWSER_VERSION? */
+function needsBrowserNext(range) {
+  return !!range && !/^[\^~=]?\s*15\.4\./.test(range.trim());
 }
 
 /**
@@ -455,7 +498,7 @@ async function pinNextForBrowser(container, workdir, onOutput) {
   const pkg = JSON.parse(await container.fs.readFile(pkgPath, 'utf-8'));
   const section = pkg.dependencies?.next ? 'dependencies' : 'devDependencies';
   const range = pkg[section]?.next;
-  if (!needsOlderNext(range)) return;
+  if (!needsBrowserNext(range)) return;
   pkg[section].next = NEXT_BROWSER_VERSION;
   for (const key of ['dependencies', 'devDependencies']) {
     if (pkg[key]?.['eslint-config-next']) pkg[key]['eslint-config-next'] = NEXT_BROWSER_VERSION;
@@ -463,6 +506,7 @@ async function pinNextForBrowser(container, workdir, onOutput) {
   await container.fs.writeFile(pkgPath, JSON.stringify(pkg, null, 2));
   onOutput(`Next.js ${range} can't run in the browser sandbox yet — using Next.js ${NEXT_BROWSER_VERSION} here (the runner engine uses the repo's own version).\n`);
 }
+
 
 /**
  * After install: Turbopack needs native bindings the sandbox doesn't have

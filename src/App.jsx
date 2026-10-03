@@ -3,7 +3,7 @@ import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
 import { parseGithubUrl, fetchRepoTree, hydrateAllFiles, detectEnvVars } from './lib/github.js';
-import { runRepo, stopActiveRun } from './lib/runner.js';
+import { runRepo, stopActiveRun, waitUntilResponds } from './lib/runner.js';
 import { runStaticSite } from './lib/static-runner.js';
 import { runPythonInBrowser, buildStlitePage } from './lib/python-runner.js';
 import { planBrowserRun } from './lib/browser-plan.js';
@@ -543,8 +543,11 @@ export default function App() {
         envVars,
         analysis: analysisRef.current,
         onOutput: writeLog,
-        onServerReady: (url) => {
+        onServerReady: async (url) => {
           becameReady = true;
+          setPhase('start');
+          writeLog(`\n\x1b[36m▸ Server is up — loading the first page (frameworks compile it on first visit)…\x1b[0m\n`);
+          await waitUntilResponds(url);
           setPreviewUrl(url);
           setStage(STAGES.READY);
           writeLog(`\n\x1b[1;32m✓ App is live at ${url}\x1b[0m\n`);
@@ -554,11 +557,12 @@ export default function App() {
           setInputTarget(null);
           if (!becameReady) {
             fallbackToBackend(envVars, `the in-browser run exited (code ${code})`);
-          } else if (code !== 0) {
-            // The dev server listened, then crashed (e.g. while compiling):
-            // don't leave a dead preview on screen.
+          } else {
+            // A dev server never exits on its own: it listened, then stopped
+            // (e.g. Next.js failing to load its compiler exits with 0).
+            // Don't leave a dead preview on screen.
             setPreviewUrl('');
-            fail(`The app crashed after starting (exit code ${code}) — the terminal shows why.`);
+            fail(`The app stopped after starting (exit code ${code}) — the terminal shows why.`);
           }
         },
       });
