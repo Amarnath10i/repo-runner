@@ -21,32 +21,6 @@ export function stopActiveRun() {
   activeRun = { processes: [], unsubscribe: null };
 }
 
-/**
- * Dev servers (Next.js, TanStack Start, Vite SSR) say they're ready as soon as
- * they listen, but compile the first page only when it's requested — which
- * can take a minute in the sandbox. Request it (no-cors: the preview is another
- * origin) and resolve once it answers, so the preview never opens blank.
- */
-export async function waitUntilResponds(url, { timeoutMs = 300000, onWaiting } = {}) {
-  const deadline = Date.now() + timeoutMs;
-  let notified = false;
-  while (Date.now() < deadline) {
-    const started = Date.now();
-    try {
-      await fetch(url, { mode: 'no-cors', cache: 'no-store', signal: AbortSignal.timeout(180000) });
-      return true;
-    } catch {
-      // still compiling, or not reachable yet
-    }
-    if (!notified && Date.now() - started < 1000) {
-      notified = true;
-      onWaiting?.();
-    }
-    await new Promise((r) => setTimeout(r, 2000));
-  }
-  return false;
-}
-
 /** Empty the container's filesystem so a new repo doesn't mix with the last one. */
 export async function clearContainerFs(container) {
   for (const name of await container.fs.readdir('.')) {
@@ -84,7 +58,7 @@ export async function getContainer() {
 // package.json before running so a repo whose app is nested in a subfolder — or
 // which has no package.json at all — is handled correctly instead of crashing
 // with a confusing `npm install` ENOENT.
-export async function runRepo({ tree, envVars, analysis, onOutput, onServerReady, onExit }) {
+export async function runRepo({ tree, envVars, analysis, onOutput, onServerReady, onPageReady, onExit }) {
   const container = await getContainer();
   stopActiveRun();
   await clearContainerFs(container);
@@ -177,16 +151,20 @@ export async function runRepo({ tree, envVars, analysis, onOutput, onServerReady
   // the preview once the dev server reports the compile (or after 4 minutes).
   const deps = { ...(pkg?.dependencies || {}), ...(pkg?.devDependencies || {}) };
   const compilesOnRequest = ['next', 'nuxt', '@sveltejs/kit', '@remix-run/dev', '@tanstack/react-start', '@tanstack/start', 'astro'].some((d) => deps[d]);
+  // The page must be requested through the preview frame (WebContainer serves
+  // it via a service worker there), so the frame loads right away but stays
+  // hidden ({ pending: true }) until the dev server logs the compile.
   let markCompiled;
   const compiled = new Promise((r) => { markCompiled = r; });
   trackRun({
-    unsubscribe: container.on('server-ready', async (port, url) => {
-      if (compilesOnRequest) {
-        onOutput('\nServer is listening — compiling the first page…\n');
-        fetch(url, { mode: 'no-cors', cache: 'no-store' }).catch(() => {});
-        await Promise.race([compiled, new Promise((r) => setTimeout(r, 240000))]);
+    unsubscribe: container.on('server-ready', (port, url) => {
+      if (!compilesOnRequest) {
+        onServerReady(url, port);
+        return;
       }
-      onServerReady(url, port);
+      onOutput('\nServer is listening — compiling the first page…\n');
+      onServerReady(url, port, { pending: true });
+      Promise.race([compiled, new Promise((r) => setTimeout(r, 300000))]).then(() => onPageReady?.());
     }),
   });
 

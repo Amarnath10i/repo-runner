@@ -948,3 +948,15 @@ button:disabled { cursor: not-allowed; }
   background: rgba(245, 185, 66, 0.08);
   border: 1px solid rgba(245, 185, 66, 0.25);
 }
+
+/* Hidden frame that loads an SSR app's first page while the launch screen shows. */
+.warmup-frame {
+  position: absolute;
+  width: 1280px;
+  height: 800px;
+  left: -10000px;
+  top: 0;
+  opacity: 0;
+  pointer-events: none;
+  border: 0;
+}

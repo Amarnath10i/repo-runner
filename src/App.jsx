@@ -3,7 +3,7 @@ import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
 import { parseGithubUrl, fetchRepoTree, hydrateAllFiles, detectEnvVars } from './lib/github.js';
-import { runRepo, stopActiveRun, waitUntilResponds } from './lib/runner.js';
+import { runRepo, stopActiveRun } from './lib/runner.js';
 import { runStaticSite } from './lib/static-runner.js';
 import { runPythonInBrowser, buildStlitePage } from './lib/python-runner.js';
 import { planBrowserRun } from './lib/browser-plan.js';
@@ -118,6 +118,7 @@ export default function App() {
   const [envValues, setEnvValues] = useState({});
   const [previewUrl, setPreviewUrl] = useState('');
   const [previewKey, setPreviewKey] = useState(0);
+  const [previewPending, setPreviewPending] = useState(false); // frame loading behind the launch screen
   const [runtimeInfo, setRuntimeInfo] = useState(null);
   const [serverOnline, setServerOnline] = useState(false);
   const [dockerOnline, setDockerOnline] = useState(false);
@@ -290,6 +291,7 @@ export default function App() {
     setErrorKind(null);
     setRuntimeInfo(null);
     setPreviewUrl('');
+    setPreviewPending(false);
     setExecutionMode(null);
     setPhase(null);
     setFigures([]);
@@ -543,14 +545,22 @@ export default function App() {
         envVars,
         analysis: analysisRef.current,
         onOutput: writeLog,
-        onServerReady: async (url) => {
+        onServerReady: (url, port, info) => {
           becameReady = true;
-          setPhase('start');
-          writeLog(`\n\x1b[36m▸ Server is up — loading the first page (frameworks compile it on first visit)…\x1b[0m\n`);
-          await waitUntilResponds(url);
           setPreviewUrl(url);
+          if (info?.pending) {
+            // The frame loads (and triggers the compile) behind the launch screen.
+            setPreviewPending(true);
+            setPhase('start');
+            return;
+          }
           setStage(STAGES.READY);
           writeLog(`\n\x1b[1;32m✓ App is live at ${url}\x1b[0m\n`);
+        },
+        onPageReady: () => {
+          setPreviewPending(false);
+          setStage(STAGES.READY);
+          writeLog(`\n\x1b[1;32m✓ App is live!\x1b[0m\n`);
         },
         // If the in-browser process exits before serving, fall back to the engine.
         onExit: (code) => {
@@ -886,7 +896,12 @@ export default function App() {
 
       <main className={`workspace ${stage === STAGES.IDLE ? 'hidden' : ''}`}>
         <section className="stage-area">
-          {previewUrl ? (
+          {previewUrl && previewPending && (
+            // Requests the page through the sandbox so the framework compiles
+            // it, while the launch screen stays up.
+            <iframe title="Warming up" src={previewUrl} className="warmup-frame" aria-hidden="true" tabIndex={-1} />
+          )}
+          {previewUrl && !previewPending ? (
             <div className="browser">
               <div className="browser-bar">
                 <span className="browser-dots"><i /><i /><i /></span>
