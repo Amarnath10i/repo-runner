@@ -1402,7 +1402,9 @@ function baseProcessEnv(envVars) {
     // T3-style env validation (@t3-oss/env) would refuse to start without every
     // secret; the demo should still come up and show its pages.
     SKIP_ENV_VALIDATION: '1',
-    ...(envVars || {}),
+    // Values left blank weren't provided: a real-but-empty variable would
+    // override the repo's .env (Laravel's APP_KEY, dotenv defaults).
+    ...Object.fromEntries(Object.entries(envVars || {}).filter(([, v]) => v !== '' && v != null)),
   };
 }
 
