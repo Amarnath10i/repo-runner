@@ -10,13 +10,15 @@ import {
 let containerInstance = null;
 // The container outlives a run, so the previous run's process and
 // server-ready listener must be cleaned up before the next one starts.
-let activeRun = { process: null, unsubscribe: null };
+let activeRun = { processes: [], unsubscribe: null };
 
 /** Stop whatever the last in-browser run started. */
 export function stopActiveRun() {
-  try { activeRun.process?.kill(); } catch {}
+  for (const proc of activeRun.processes) {
+    try { proc.kill(); } catch {}
+  }
   try { activeRun.unsubscribe?.(); } catch {}
-  activeRun = { process: null, unsubscribe: null };
+  activeRun = { processes: [], unsubscribe: null };
 }
 
 /** Empty the container's filesystem so a new repo doesn't mix with the last one. */
@@ -26,9 +28,10 @@ export async function clearContainerFs(container) {
   }
 }
 
-/** Remember a run's process/listener so stopActiveRun() can clean it up. */
-export function trackRun(run) {
-  activeRun = { ...activeRun, ...run };
+/** Remember a run's processes/listener so stopActiveRun() can clean them up. */
+export function trackRun({ process, unsubscribe }) {
+  if (process) activeRun.processes.push(process);
+  if (unsubscribe) activeRun.unsubscribe = unsubscribe;
 }
 
 // Boot is expensive and WebContainer only allows one instance per tab, so we
@@ -62,6 +65,10 @@ export async function runRepo({ tree, envVars, analysis, onOutput, onServerReady
 
   onOutput('Mounting repo files into the container...\n');
   await container.mount(tree);
+
+  // frontend/ + backend/ folders with no root app: run both, wired together.
+  const services = tree['package.json']?.file ? null : findFrontendBackend(tree);
+  if (services) return runFrontendAndBackend({ container, tree, services, envVars, onOutput, onServerReady, onExit });
 
   // --- Fix: locate WHERE the Node project actually lives. ---
   const workdir = analysis?.workdir ?? findPackageJsonDir(tree);
@@ -115,6 +122,7 @@ export async function runRepo({ tree, envVars, analysis, onOutput, onServerReady
   await upgradeOldEsbuild(container, workdir, onOutput);
   await installDependencies(container, installArgv, workdir, onOutput);
   if (hasNext) await patchNextScripts(container, workdir, onOutput);
+  await shimNativeSqlite(container, workdir, onOutput);
 
   const startScript = pickStartScript(pkg);
   const workspace = !startScript && pkg?.workspaces ? await pickWorkspace(container, workdir, pkg) : null;
@@ -142,22 +150,238 @@ export async function runRepo({ tree, envVars, analysis, onOutput, onServerReady
   // surface a clearer error instead of leaving the user with a dead terminal.
   const run = await container.spawn(startArgv[0], startArgv.slice(1), spawnOpts(workdir));
   trackRun({ process: run });
-  pipeToOutput(run, onOutput); // don't await — this runs indefinitely
+  // Watchers (nodemon, tsx watch, next dev) keep running after the app crashes
+  // ("app crashed - waiting for file changes"), so an exit never comes: treat
+  // those messages as an exit too, unless a server came up meanwhile.
+  let ended = false;
+  const end = (code) => {
+    if (ended) return;
+    ended = true;
+    onExit?.(code);
+  };
+  let crashTimer = null;
+  pipeToOutput(run, (text) => {
+    onOutput(text);
+    if (!crashTimer && CRASH_MARKERS.test(text)) {
+      crashTimer = setTimeout(() => end(1), 4000);
+    }
+  }); // don't await — this runs indefinitely
+  trackRun({ unsubscribe: chain(activeRun.unsubscribe, container.on('server-ready', () => clearTimeout(crashTimer))) });
 
   run.exit
     .then((code) => {
       onOutput(`\nProcess exited with code ${code}.\n`);
       // The dev server shouldn't exit on its own — if it did, it crashed
       // (e.g. a native module WebContainers can't load). Signal for fallback.
-      onExit?.(code);
+      end(code);
     })
     .catch(() => {
-      onExit?.(-1);
+      end(-1);
     });
 
   return { container, process: run };
 }
 
+const FRONTEND_DEPS = ['vite', 'next', 'react-scripts', '@sveltejs/kit', 'nuxt', 'vue', '@angular/core', 'react-dom'];
+
+/** Top-level folders with a runnable package.json: one frontend + one backend, or null. */
+function findFrontendBackend(tree) {
+  const found = [];
+  for (const [name, node] of Object.entries(tree)) {
+    if (!node.directory || name.startsWith('.') || name === 'node_modules') continue;
+    const pkg = readPackageJsonAt(tree, name);
+    const script = pickStartScript(pkg);
+    if (!pkg || !script) continue;
+    const deps = { ...(pkg.dependencies || {}), ...(pkg.devDependencies || {}) };
+    found.push({ dir: name, pkg, script, frontend: FRONTEND_DEPS.some((d) => deps[d]) });
+  }
+  const frontend = found.find((s) => s.frontend);
+  const backend = found.find((s) => !s.frontend);
+  return frontend && backend ? { frontend, backend } : null;
+}
+
+/**
+ * Env for the frontend so it reaches the backend's sandbox URL. Finds API
+ * settings that default to the backend's localhost port — in .env.example or
+ * in code (import.meta.env.VITE_API_URL || "http://localhost:4000/api") — and
+ * keeps their path.
+ */
+function wireFrontendEnv(tree, frontendDir, backendPort, backendUrl) {
+  const env = {};
+  const sources = [];
+  const walk = (node, depth) => {
+    for (const [name, child] of Object.entries(node || {})) {
+      if (child.directory && depth < 4 && name !== 'node_modules') walk(child.directory, depth + 1);
+      else if (child.file && /\.(env\.example|env\.sample|env\.development|[jt]sx?|vue|svelte)$|^\.env/.test(name)) sources.push(child.file.contents);
+    }
+  };
+  walk(tree[frontendDir]?.directory, 0);
+  const re = /(?:import\.meta\.env\.|process\.env\.)?((?:VITE|REACT_APP|NEXT_PUBLIC|PUBLIC)_[A-Z0-9_]+)\s*(?:\|\||\?\?|=)\s*["'`]?(https?:\/\/(?:localhost|127\.0\.0\.1):(\d+)([^"'`\s]*))/g;
+  for (const text of sources) {
+    if (typeof text !== 'string') continue;
+    for (const m of text.matchAll(re)) {
+      if (Number(m[3]) === backendPort) env[m[1]] = `${backendUrl.replace(/\/$/, '')}${m[4] || ''}`;
+    }
+  }
+  // Common names as a fallback, pointing at the backend's root.
+  for (const key of ['VITE_API_URL', 'VITE_BACKEND_URL', 'REACT_APP_API_URL', 'NEXT_PUBLIC_API_URL']) env[key] ??= backendUrl;
+  return env;
+}
+
+async function runFrontendAndBackend({ container, tree, services, envVars, onOutput, onServerReady, onExit }) {
+  const { frontend, backend } = services;
+  const userEnv = Object.fromEntries(Object.entries(envVars || {}).filter(([, v]) => v !== ''));
+
+  onOutput(`Full-stack repo: starting ./${backend.dir} (API) and ./${frontend.dir} (site) together.\n`);
+  await installDependencies(container, ['npm', 'install'], backend.dir, onOutput);
+  await shimNativeSqlite(container, backend.dir, onOutput);
+
+  // Start the API first and learn its sandbox URL from server-ready.
+  let resolveBackend;
+  const backendReady = new Promise((r) => { resolveBackend = r; });
+  let phase = 'backend';
+  trackRun({
+    unsubscribe: container.on('server-ready', (port, url) => {
+      if (phase === 'backend') resolveBackend({ port, url });
+      else onServerReady(url, port);
+    }),
+  });
+  const api = await container.spawn('npm', ['run', backend.script], { cwd: backend.dir, env: { ...SANDBOX_ENV, ...userEnv } });
+  trackRun({ process: api });
+  pipeToOutput(api, (t) => onOutput(t.replace(/^(?=[^
+])/gm, '[api] ')));
+  const apiInfo = await Promise.race([backendReady, new Promise((r) => setTimeout(() => r(null), 90000))]);
+  if (apiInfo) onOutput(`\nAPI is up at ${apiInfo.url}\n`);
+  else onOutput('\nThe API did not open a port — starting the site anyway.\n');
+
+  phase = 'frontend';
+  const wired = apiInfo ? wireFrontendEnv(tree, frontend.dir, apiInfo.port, apiInfo.url) : {};
+  if (apiInfo) onOutput(`Pointing the site at the API (${Object.keys(wired).join(', ')}).\n`);
+  await installDependencies(container, ['npm', 'install'], frontend.dir, onOutput);
+  if (frontend.pkg.dependencies?.next || frontend.pkg.devDependencies?.next) {
+    await pinNextForBrowser(container, frontend.dir, onOutput);
+    await patchNextScripts(container, frontend.dir, onOutput);
+  }
+  const site = await container.spawn('npm', ['run', frontend.script], { cwd: frontend.dir, env: { ...SANDBOX_ENV, ...wired, ...userEnv } });
+  trackRun({ process: site });
+  pipeToOutput(site, onOutput);
+  site.exit.then((code) => {
+    onOutput(`\nThe site process exited with code ${code}.\n`);
+    onExit?.(code);
+  });
+  return { container, process: site };
+}
+
+const CRASH_MARKERS =/app crashed - waiting for file changes|Could not locate the bindings file|ERR_DLOPEN_FAILED|Failed running '.*'\. Waiting for file changes/;
+
+const chain = (a, b) => () => {
+  try { a?.(); } catch {}
+  try { b?.(); } catch {}
+};
+
+/**
+ * better-sqlite3 is a native addon the browser sandbox can't load. Swap in a
+ * small compatible wrapper over Node's built-in node:sqlite (same synchronous
+ * prepare/run/get/all/transaction API), so apps that use it still start.
+ */
+async function shimNativeSqlite(container, workdir, onOutput) {
+  const dir = joinPath(workdir, 'node_modules/better-sqlite3');
+  const pkg = await container.fs.readFile(`${dir}/package.json`, 'utf-8').then(JSON.parse, () => null);
+  if (!pkg) return;
+  onOutput("better-sqlite3 can't load in the browser sandbox — swapping in SQLite compiled to WebAssembly...\n");
+  const add = await container.spawn('npm', ['install', 'node-sqlite3-wasm@0.8', '--no-save', '--no-audit', '--no-fund'], spawnOpts(workdir));
+  await pipeToOutput(add, onOutput);
+  if ((await add.exit) !== 0) return;
+  const main = (pkg.main || 'lib/index.js').replace(/^\.\//, '');
+  await container.fs.writeFile(`${dir}/${main}`, BETTER_SQLITE3_SHIM);
+}
+
+// The better-sqlite3 API on top of node-sqlite3-wasm (synchronous WASM SQLite
+// that reads and writes real database files).
+const BETTER_SQLITE3_SHIM = String.raw`'use strict';
+const { Database: WasmDatabase } = require('node-sqlite3-wasm');
+
+const toParam = (v) => (v === true ? 1 : v === false ? 0 : v === undefined ? null : v);
+
+// better-sqlite3 takes positional values as separate arguments and named ones
+// without their prefix; node-sqlite3-wasm wants an array, or keys with the
+// prefix the SQL uses (:name, @name or $name).
+function bind(sql, list) {
+  if (list.length === 1 && list[0] && typeof list[0] === 'object' && !Array.isArray(list[0]) && !(list[0] instanceof Uint8Array)) {
+    const named = {};
+    for (const [key, value] of Object.entries(list[0])) {
+      const prefix = /^[:@$]/.test(key) ? '' : (sql.match(new RegExp('([:@$])' + key + '\\b')) || [, ':'])[1];
+      named[prefix + key] = toParam(value);
+    }
+    return named;
+  }
+  const flat = list.flat().map(toParam);
+  return flat.length ? flat : undefined;
+}
+
+class Statement {
+  constructor(db, source) { this.db = db; this.source = source; this._pluck = false; this._raw = false; this.reader = /^\s*(select|pragma|with|values|explain)\b/i.test(source) || /\breturning\b/i.test(source); }
+  _row(r) { if (r == null) return undefined; const v = Object.values(r); return this._pluck ? v[0] : this._raw ? v : r; }
+  run(...a) { const r = this.db._db.run(this.source, bind(this.source, a)); return { changes: r.changes, lastInsertRowid: r.lastInsertRowid }; }
+  get(...a) { return this._row(this.db._db.get(this.source, bind(this.source, a))); }
+  all(...a) { return this.db._db.all(this.source, bind(this.source, a)).map((r) => this._row(r)); }
+  *iterate(...a) { yield* this.all(...a); }
+  pluck(on = true) { this._pluck = on; return this; }
+  raw(on = true) { this._raw = on; return this; }
+  expand() { return this; }
+  safeIntegers() { return this; }
+  bind() { return this; }
+  columns() { return []; }
+}
+
+class Database {
+  constructor(filename = ':memory:', options = {}) {
+    this.name = filename || ':memory:';
+    this.memory = this.name === ':memory:';
+    this.readonly = !!options.readonly;
+    try {
+      this._db = new WasmDatabase(this.name, { readOnly: this.readonly, fileMustExist: !!options.fileMustExist });
+    } catch (err) {
+      // The sandbox's filesystem can't host SQLite files; keep the app running
+      // on an in-memory database (it lasts for this session).
+      if (this.memory) throw err;
+      console.warn('[repo-runner] ' + this.name + ': using an in-memory SQLite database in the browser sandbox.');
+      this._db = new WasmDatabase(':memory:');
+      this.memory = true;
+    }
+  }
+  get open() { return this._db.isOpen; }
+  get inTransaction() { return this._db.inTransaction; }
+  prepare(sql) { return new Statement(this, sql); }
+  exec(sql) { this._db.exec(sql); return this; }
+  pragma(source, options = {}) {
+    const rows = this._db.all('PRAGMA ' + source);
+    return options.simple ? (rows[0] ? Object.values(rows[0])[0] : undefined) : rows;
+  }
+  transaction(fn) {
+    const db = this;
+    const run = function (...a) {
+      db._db.exec('BEGIN');
+      try { const r = fn.apply(this, a); db._db.exec('COMMIT'); return r; }
+      catch (e) { if (db._db.inTransaction) db._db.exec('ROLLBACK'); throw e; }
+    };
+    run.deferred = run.immediate = run.exclusive = run;
+    return run;
+  }
+  function(name, opts, fn) { if (typeof opts === 'function') { fn = opts; opts = {}; } this._db.function(name, fn, opts); return this; }
+  aggregate() { return this; }
+  defaultSafeIntegers() { return this; }
+  unsafeMode() { return this; }
+  loadExtension() { throw new Error('SQLite extensions are not available in the browser sandbox'); }
+  backup() { return Promise.resolve({ totalPages: 0, remainingPages: 0 }); }
+  close() { if (this._db.isOpen) this._db.close(); return this; }
+}
+
+class SqliteError extends Error {}
+module.exports = Database;
+module.exports.default = Database;
+module.exports.SqliteError = SqliteError;
+`;
 // BROWSER=none: create-react-app & co. would otherwise try to open a tab.
 const SANDBOX_ENV = { BROWSER: 'none', SKIP_ENV_VALIDATION: '1' };
 

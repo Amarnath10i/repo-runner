@@ -374,10 +374,15 @@ export default function App() {
       analysisRef.current = analysis;
 
       // ── Decide where it runs ──
-      if (analysis.canRunInBrowserSandbox) {
+      // Full-stack repos (a JS app plus e.g. a Python API) run whole on the
+      // engine when one is connected; otherwise the JS app runs in the browser.
+      const engineForAll = analysis.otherServices && (await refreshBackendStatus(0)).serverOnline;
+      if (analysis.canRunInBrowserSandbox && !engineForAll) {
         setExecutionMode('webcontainer');
         setRuntimeInfo({ id: 'node', label: 'Node.js', color: '#68a063' });
-        writeLog(`\x1b[1;32m✓ Node.js project — running in your browser (WebContainers)\x1b[0m\n`);
+        writeLog(analysis.otherServices
+          ? `\x1b[1;32m✓ Running the JavaScript app in your browser.\x1b[0m\n\x1b[33m  Its ${analysis.otherServices} part needs the runner engine — connect one to run the whole repo.\x1b[0m\n`
+          : `\x1b[1;32m✓ Node.js project — running in your browser (WebContainers)\x1b[0m\n`);
         return await askEnvOrRun(detectEnvVars(tree), analysis, (env) => startWebContainerRun(tree, env));
       }
 

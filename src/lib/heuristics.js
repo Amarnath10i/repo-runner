@@ -81,11 +81,33 @@ export function detectStack(tree) {
 }
 
 export function analyzeTreeLocally(tree) {
-  // First, check if the repo requires a non-Node backend (Python, Docker, Go, Rust, etc.)
-  // Even if it has a package.json, if it ALSO has a requirements.txt or Dockerfile,
-  // WebContainers won't be able to run the backend half. So we must use Docker.
   const stack = detectStack(tree);
-  
+
+  // A runnable JavaScript app at the root (dev/start script) is what the repo
+  // shows people, even when a Python API, a Dockerfile or other services sit
+  // beside it (e.g. Vite + FastAPI). The browser can run that app; the engine,
+  // when connected, runs the whole thing (see otherServices).
+  const rootPkg = tree['package.json']?.file ? readPackageJsonAt(tree, '') : null;
+  const rootScript = pickStartScript(rootPkg);
+  if (rootScript && stack.runtime !== 'unknown') {
+    const manager = detectPackageManager(tree, '');
+    const blocker = treeWebContainerBlocker(tree);
+    return {
+      ok: true,
+      source: 'heuristic',
+      runtime: 'node',
+      canRunInBrowserSandbox: !blocker,
+      workdir: '',
+      installCmd: `${manager} install`,
+      startCmd: manager === 'npm' ? `npm run ${rootScript}` : `${manager} ${rootScript}`,
+      envVarsMentioned: [],
+      otherServices: stack.label,
+      reasoning: blocker
+        ? `${blocker} — running on the engine with real Node instead of in-browser.`
+        : `Full-stack repo: its JavaScript app runs in your browser; the ${stack.label} part needs the runner engine.`,
+    };
+  }
+
   if (stack.runtime !== 'unknown') {
     return {
       ok: true,
@@ -203,7 +225,9 @@ export function webContainerIncompatibleReason(pkg) {
 
 /** Scan every package.json in the tree (root + subfolders) for a blocker. */
 export function treeWebContainerBlocker(tree) {
-  if (tree['bun.lockb']?.file || tree['bun.lock']?.file) {
+  // Only a Bun-only project: many repos keep a bun.lock next to package-lock.json.
+  const hasOtherLock = ['package-lock.json', 'yarn.lock', 'pnpm-lock.yaml'].some((f) => tree[f]?.file);
+  if ((tree['bun.lockb']?.file || tree['bun.lock']?.file) && !hasOtherLock) {
     return 'This is a Bun project, and Bun can\'t run in the browser sandbox';
   }
   const queue = [tree];

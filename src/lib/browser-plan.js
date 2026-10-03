@@ -21,6 +21,18 @@ export function listFiles(tree, prefix = '', out = []) {
   return out;
 }
 
+/** The code cells of a notebook (JSON text) joined into one source string. */
+function codeCells(json) {
+  try {
+    return (JSON.parse(json || '{}').cells || [])
+      .filter((c) => c.cell_type === 'code')
+      .map((c) => (Array.isArray(c.source) ? c.source.join('') : c.source || ''))
+      .join('\n');
+  } catch {
+    return '';
+  }
+}
+
 /** Text contents of a file in the tree, or null if missing/not downloaded. */
 export function readText(tree, path) {
   let node = { directory: tree };
@@ -92,7 +104,8 @@ export function planBrowserRun(tree, stack) {
         reason: 'Hugging Face pipelines run in your browser with Transformers.js (ONNX on your GPU via WebGPU, or the CPU).',
       };
     }
-    const heavy = (manifests.match(PY_HEAVY_ML) || rootCode.match(PY_HEAVY_ML_IMPORT))?.[1];
+    const notebookCode = files.filter((f) => !f.includes('/') && f.endsWith('.ipynb')).map((f) => codeCells(readText(tree, f))).join('\n');
+    const heavy = (manifests.match(PY_HEAVY_ML) || rootCode.match(PY_HEAVY_ML_IMPORT) || notebookCode.match(PY_HEAVY_ML_IMPORT))?.[1];
     if (heavy) {
       return { kind: null, reason: `This project uses ${heavy}, which can't run in a browser tab — it needs the runner engine (CPU builds are installed automatically).` };
     }

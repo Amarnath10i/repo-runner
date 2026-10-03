@@ -125,6 +125,7 @@ export async function fetchRepoTree({ owner, repo, branch, token, onProgress }) 
   // small and let the in-browser planner see what a script imports).
   const keyBlobs = blobs.filter((b) =>
     KEY_FILENAMES.has(b.path.split('/').pop()) || (!b.path.includes('/') && b.path.endsWith('.py'))
+    || (!b.path.includes('/') && b.path.endsWith('.ipynb') && b.size < 2_000_000) // to see what notebooks import
   );
   await downloadBlobs({ owner, repo, branch, token, tree: root, entries: keyBlobs, onProgress, label: 'manifest file(s)' });
 
