@@ -58,7 +58,7 @@ export async function getContainer() {
 // package.json before running so a repo whose app is nested in a subfolder — or
 // which has no package.json at all — is handled correctly instead of crashing
 // with a confusing `npm install` ENOENT.
-export async function runRepo({ tree, envVars, analysis, onOutput, onServerReady, onPageReady, onExit }) {
+export async function runRepo({ tree, envVars, analysis, onOutput, onServerReady, onPageReady, onNoServer, onExit }) {
   const container = await getContainer();
   stopActiveRun();
   await clearContainerFs(container);
@@ -120,6 +120,7 @@ export async function runRepo({ tree, envVars, analysis, onOutput, onServerReady
   const installArgv = analysis?.installCmd ? splitCommand(analysis.installCmd) : ['npm', 'install'];
   if (hasNext) await pinNextForBrowser(container, workdir, onOutput);
   await upgradeOldEsbuild(container, workdir, onOutput);
+  if (installArgv[0] === 'pnpm') await mirrorPnpmWorkspaceSettings(container, workdir, onOutput);
   await installDependencies(container, installArgv, workdir, onOutput);
   if (hasNext) {
     await patchNextScripts(container, workdir, onOutput);
@@ -182,6 +183,8 @@ export async function runRepo({ tree, envVars, analysis, onOutput, onServerReady
     onExit?.(code);
   };
   let crashTimer = null;
+  let watchTimer = null;
+  let serving = false;
   pipeToOutput(run, (text) => {
     onOutput(text);
     // "✓ Compiled / in 12s" (Next), "GET / 200" (most dev servers' request log)
@@ -189,8 +192,23 @@ export async function runRepo({ tree, envVars, analysis, onOutput, onServerReady
     if (!crashTimer && CRASH_MARKERS.test(text)) {
       crashTimer = setTimeout(() => end(1), 4000);
     }
+    // Library repos: the dev command builds, then only watches files. If no
+    // server follows, say so instead of waiting forever.
+    if (!watchTimer && !serving && WATCH_ONLY_MARKERS.test(text)) {
+      watchTimer = setTimeout(() => {
+        if (serving || ended) return;
+        ended = true;
+        onNoServer?.();
+      }, 90000);
+    }
   }); // don't await — this runs indefinitely
-  trackRun({ unsubscribe: chain(activeRun.unsubscribe, container.on('server-ready', () => clearTimeout(crashTimer))) });
+  trackRun({
+    unsubscribe: chain(activeRun.unsubscribe, container.on('server-ready', () => {
+      serving = true;
+      clearTimeout(crashTimer);
+      clearTimeout(watchTimer);
+    })),
+  });
 
   run.exit
     .then((code) => {
@@ -295,7 +313,9 @@ async function runFrontendAndBackend({ container, tree, services, envVars, onOut
   return { container, process: site };
 }
 
-const CRASH_MARKERS =/app crashed - waiting for file changes|Could not locate the bindings file|ERR_DLOPEN_FAILED|Failed running '.*'\. Waiting for file changes/;
+// A build in watch mode that has finished ("Found 0 errors. Watching for file changes.").
+const WATCH_ONLY_MARKERS = /watching for (file )?changes|waiting for changes|watching files|watch mode/i;
+const CRASH_MARKERS = /app crashed - waiting for file changes|Could not locate the bindings file|ERR_DLOPEN_FAILED|Failed running '.*'\. Waiting for file changes/;
 
 const chain = (a, b) => () => {
   try { a?.(); } catch {}
@@ -455,6 +475,58 @@ async function installDependencies(container, argv, workdir, onOutput) {
     throw new Error('This monorepo uses "workspace:" dependencies that need pnpm or Bun — it needs the runner engine.');
   }
   throw new Error(`Installing dependencies failed (exit code ${code}).`);
+}
+
+// pnpm-workspace.yaml settings that change where packages land, and their .npmrc names.
+const PNPM_LAYOUT_SETTINGS = {
+  publicHoistPattern: 'public-hoist-pattern',
+  hoistPattern: 'hoist-pattern',
+  shamefullyHoist: 'shamefully-hoist',
+  nodeLinker: 'node-linker',
+};
+
+/**
+ * pnpm 10 reads hoisting settings from pnpm-workspace.yaml; the sandbox's pnpm
+ * may only read .npmrc. Copy them there, or packages a build expects hoisted
+ * (e.g. onnxruntime-common) can't be resolved.
+ */
+async function mirrorPnpmWorkspaceSettings(container, workdir, onOutput) {
+  let yaml;
+  try {
+    yaml = await container.fs.readFile(joinPath(workdir, 'pnpm-workspace.yaml'), 'utf-8');
+  } catch {
+    return;
+  }
+  const lines = [];
+  const rows = yaml.split(/\r?\n/);
+  rows.forEach((row, i) => {
+    const m = row.match(/^(\w+):\s*(.*?)\s*$/);
+    const npmrcKey = m && PNPM_LAYOUT_SETTINGS[m[1]];
+    if (!npmrcKey) return;
+    const unquote = (v) => v.replace(/^['"]|['"]$/g, '');
+    if (m[2]) {
+      // scalar, or an inline list: key: [a, b]
+      const inline = m[2].match(/^\[(.*)\]$/);
+      if (inline) inline[1].split(',').map((v) => unquote(v.trim())).filter(Boolean).forEach((v) => lines.push(`${npmrcKey}[]=${v}`));
+      else lines.push(`${npmrcKey}=${unquote(m[2])}`);
+      return;
+    }
+    for (let j = i + 1; j < rows.length; j++) {
+      const item = rows[j].match(/^\s+-\s*(.+?)\s*$/);
+      if (!item) break;
+      lines.push(`${npmrcKey}[]=${unquote(item[1])}`);
+    }
+  });
+  if (!lines.length) return;
+  const npmrcPath = joinPath(workdir, '.npmrc');
+  let existing = '';
+  try {
+    existing = await container.fs.readFile(npmrcPath, 'utf-8');
+  } catch {
+    // no .npmrc yet
+  }
+  await container.fs.writeFile(npmrcPath, `${existing}${existing && !existing.endsWith('\n') ? '\n' : ''}${lines.join('\n')}\n`);
+  onOutput(`Applied pnpm workspace settings to .npmrc (${lines.join(', ')}).\n`);
 }
 
 // In WebContainers, Next.js 15.5+ fails ("Expected workStore to be initialized",
