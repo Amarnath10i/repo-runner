@@ -8,6 +8,27 @@ const API = 'https://api.github.com';
 const PROXY = '/api/github';
 
 export class RateLimitError extends Error {}
+/** GitHub couldn't be reached at all (offline, or GitHub blocked on this network). */
+export class GitHubNetworkError extends Error {}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** fetch, retried on network errors and 5xx/429 (GitHub has brief hiccups under load). */
+async function fetchWithRetry(url, init, tries = 3) {
+  for (let i = 0; ; i++) {
+    try {
+      const res = await fetch(url, init);
+      if ((res.status >= 500 || res.status === 429) && i < tries - 1) {
+        await sleep(800 * 2 ** i);
+        continue;
+      }
+      return res;
+    } catch (err) {
+      if (i >= tries - 1) throw err;
+      await sleep(800 * 2 ** i);
+    }
+  }
+}
 
 export function parseGithubUrl(input) {
   // Drop ?tab=readme-ov-file, #readme and a trailing slash or .git — all common
@@ -43,14 +64,20 @@ async function viaProxy(path) {
 async function ghFetch(path, token) {
   let res;
   try {
-    res = await fetch(`${API}${path}`, {
+    res = await fetchWithRetry(`${API}${path}`, {
       headers: {
         Accept: 'application/vnd.github+json',
         ...(token ? { Authorization: `Bearer ${token}` } : {}),
       },
     });
   } catch {
-    throw new Error("Couldn't reach GitHub — check your internet connection.");
+    // api.github.com unreachable from this browser — the site's proxy may still get through.
+    res = await viaProxy(path);
+    if (!res) {
+      throw new GitHubNetworkError(
+        "Couldn't reach GitHub from this browser. Check your internet connection — or whether a VPN, firewall, ad blocker or your network provider is blocking github.com — then try again."
+      );
+    }
   }
   if (!token && isRateLimited(res)) res = (await viaProxy(path)) || res;
   if (!res.ok) {
@@ -194,7 +221,7 @@ async function fetchFileContents({ owner, repo, branch, token, entry }) {
   const rawUrl = `https://raw.githubusercontent.com/${owner}/${repo}/${branch}/${filePath}`;
   const auth = token ? { headers: { Authorization: `Bearer ${token}` } } : undefined;
   try {
-    const res = await fetch(rawUrl, auth);
+    const res = await fetchWithRetry(rawUrl, auth);
     if (res.ok) {
       let bytes = new Uint8Array(await res.arrayBuffer());
       if (isLfsPointer(bytes)) {

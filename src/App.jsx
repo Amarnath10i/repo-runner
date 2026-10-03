@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, useCallback } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
-import { parseGithubUrl, fetchRepoTree, hydrateAllFiles, detectEnvVars } from './lib/github.js';
+import { parseGithubUrl, fetchRepoTree, hydrateAllFiles, detectEnvVars, GitHubNetworkError, RateLimitError } from './lib/github.js';
 import { runRepo, stopActiveRun } from './lib/runner.js';
 import { runStaticSite } from './lib/static-runner.js';
 import { runPythonInBrowser, buildStlitePage } from './lib/python-runner.js';
@@ -592,6 +592,11 @@ export default function App() {
       const writer = proc.input.getWriter();
       setInputTarget((line) => writer.write(`${line}\n`));
     } catch (err) {
+      // Not being able to download from GitHub isn't something the engine fixes.
+      if (err instanceof GitHubNetworkError || err instanceof RateLimitError) {
+        fail(err.message);
+        return;
+      }
       await fallbackToBackend(envVars, err.message);
     }
   }
