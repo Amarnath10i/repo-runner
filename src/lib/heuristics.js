@@ -213,11 +213,15 @@ const NATIVE_ADDON_DEPS = new Set([
 export function webContainerIncompatibleReason(pkg) {
   const deps = { ...(pkg?.dependencies || {}), ...(pkg?.devDependencies || {}) };
   const scripts = Object.values(pkg?.scripts || {}).join(' ');
-  if (/^bun@/.test(pkg?.packageManager || '') || /(^|\s|&&)bun(x)?\s/.test(scripts)) {
-    return 'This is a Bun project, and Bun can\'t run in the browser sandbox';
+  // Only the script that starts the app matters ("test": "bun test" doesn't);
+  // a bun.lockb alone is fine — npm installs from package.json.
+  const startScript = pkg?.scripts?.[pickStartScript(pkg)] || '';
+  if (/(^|\s|&&|;)bunx?\s/.test(startScript)) {
+    return 'This app starts with Bun, and Bun can\'t run in the browser sandbox';
   }
   if (deps.turbo && /\bturbo\s/.test(scripts)) return 'Turborepo is a native program that can\'t run in the browser sandbox';
   if (deps.next) return 'Next.js uses native/WASM bindings that break in-browser';
+  if (deps.prisma || deps['@prisma/client']) return 'Prisma downloads native database engines, which the browser sandbox can\'t run';
   const native = Object.keys(deps).find((d) => NATIVE_ADDON_DEPS.has(d));
   if (native) return `"${native}" is a native module that can't load in a browser sandbox`;
   return null;
@@ -225,11 +229,6 @@ export function webContainerIncompatibleReason(pkg) {
 
 /** Scan every package.json in the tree (root + subfolders) for a blocker. */
 export function treeWebContainerBlocker(tree) {
-  // Only a Bun-only project: many repos keep a bun.lock next to package-lock.json.
-  const hasOtherLock = ['package-lock.json', 'yarn.lock', 'pnpm-lock.yaml'].some((f) => tree[f]?.file);
-  if ((tree['bun.lockb']?.file || tree['bun.lock']?.file) && !hasOtherLock) {
-    return 'This is a Bun project, and Bun can\'t run in the browser sandbox';
-  }
   const queue = [tree];
   while (queue.length) {
     const node = queue.shift();
@@ -278,8 +277,9 @@ export function pickStartScript(pkg) {
   const scripts = pkg?.scripts ?? {};
   if (scripts.dev) return 'dev';
   if (scripts.start) return 'start';
-  if (scripts.preview) return 'preview';
+  // "serve" is usually a dev server; "preview" only serves an existing build.
   if (scripts.serve) return 'serve';
+  if (scripts.preview) return 'preview';
   return null;
 }
 

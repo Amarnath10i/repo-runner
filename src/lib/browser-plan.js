@@ -125,7 +125,11 @@ export function planBrowserRun(tree, stack) {
     if (entry) {
       return { kind: 'python-script', label: 'Python (in-browser)', entry, reason: 'Python runs in your browser via Pyodide (WebAssembly).' };
     }
-    const notebook = files.find((f) => f.endsWith('.ipynb') && !f.includes('.ipynb_checkpoints'));
+    // Skip table-of-contents / preface notebooks (Index.ipynb, 00.00-Preface)
+    // when there are real ones.
+    const notebooks = files.filter((f) => f.endsWith('.ipynb') && !f.includes('.ipynb_checkpoints'));
+    const isFrontMatter = (f) => /(^|\/)(index|contents|toc|preface|readme|intro(duction)?|00[._-]00)[^/]*\.ipynb$|preface/i.test(f);
+    const notebook = notebooks.find((f) => !isFrontMatter(f)) || notebooks[0];
     if (notebook) {
       return { kind: 'python-notebook', label: 'Jupyter notebook (in-browser)', entry: notebook, reason: 'The notebook runs top to bottom in your browser via Pyodide.' };
     }

@@ -474,6 +474,14 @@ async function installDependencies(container, argv, workdir, onOutput) {
   if (/Unsupported URL Type "workspace:/i.test(log)) {
     throw new Error('This monorepo uses "workspace:" dependencies that need pnpm or Bun — it needs the runner engine.');
   }
+  // A postinstall step that downloads native binaries (prisma generate,
+  // electron...) can't succeed here; the packages themselves may still work.
+  if (/postinstall|install script|ELIFECYCLE|binaries\.prisma\.sh/i.test(log)) {
+    onOutput('\nAn install script failed — retrying without install scripts...\n');
+    proc = await container.spawn('npm', ['install', '--legacy-peer-deps', '--ignore-scripts', '--no-audit', '--no-fund'], spawnOpts(workdir));
+    await pipeToOutput(proc, onOutput);
+    if ((await proc.exit) === 0) return;
+  }
   throw new Error(`Installing dependencies failed (exit code ${code}).`);
 }
 
@@ -496,6 +504,12 @@ async function mirrorPnpmWorkspaceSettings(container, workdir, onOutput) {
     yaml = await container.fs.readFile(joinPath(workdir, 'pnpm-workspace.yaml'), 'utf-8');
   } catch {
     return;
+  }
+  // pnpm 10 accepts a settings-only workspace file; older pnpm rejects it
+  // ("packages field missing or empty") — declare the root as the one package.
+  if (!/^packages\s*:/m.test(yaml)) {
+    await container.fs.writeFile(joinPath(workdir, 'pnpm-workspace.yaml'), `packages:\n  - '.'\n${yaml}`);
+    onOutput('Added the missing "packages" list to pnpm-workspace.yaml.\n');
   }
   const lines = [];
   const rows = yaml.split(/\r?\n/);
