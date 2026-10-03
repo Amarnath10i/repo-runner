@@ -44,9 +44,22 @@ open-source use; a commercial, for-profit deployment needs a
 `backend/Dockerfile` builds an image with Python, PHP + Composer, Ruby, GCC and
 CMake preinstalled; Go, Java, Rust, Bun and Deno are downloaded on first use.
 
-**Railway:** New Project → Deploy from GitHub repo → set **Root Directory** to
-`backend` (the Dockerfile is picked up automatically) → generate a public domain.
-Railway injects `PORT`; the server listens on it.
+**Railway (CLI, ~2 minutes):**
+
+```bash
+cd backend
+railway login          # opens your browser once
+railway init           # new project, e.g. "repo-runner-engine"
+railway up             # builds backend/Dockerfile (see backend/railway.json)
+railway domain         # prints the public URL, e.g. https://repo-runner-engine.up.railway.app
+```
+
+**Railway (dashboard):** New Project → Deploy from GitHub repo → set **Root
+Directory** to `backend` (the Dockerfile and `railway.json` are picked up
+automatically) → Settings → Networking → Generate Domain.
+
+Railway injects `PORT`; the server listens on it. Give the service at least
+2 GB of memory for ML repos (PyTorch CPU wheels and models are large).
 
 **Render / Fly:** point a Docker service at `backend/Dockerfile`.
 
