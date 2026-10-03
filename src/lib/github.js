@@ -142,6 +142,11 @@ export async function fetchRepoTree({ owner, repo, branch, token, onProgress }) 
   }
 
   const blobs = treeData.tree.filter((entry) => entry.type === 'blob');
+  const submodules = treeData.tree.filter((entry) => entry.type === 'commit');
+  const gitmodules = blobs.find((b) => b.path === '.gitmodules');
+  if (submodules.length && gitmodules) {
+    blobs.push(...(await submoduleBlobs({ owner, repo, branch, token, gitmodules, submodules, onProgress })));
+  }
   const root = {};
   for (const entry of blobs) {
     insertIntoTree(root, entry.path.split('/'), null);
@@ -157,6 +162,40 @@ export async function fetchRepoTree({ owner, repo, branch, token, onProgress }) 
   await downloadBlobs({ owner, repo, branch, token, tree: root, entries: keyBlobs, onProgress, label: 'manifest file(s)' });
 
   return { tree: root, blobs };
+}
+
+/**
+ * Files of the repo's GitHub-hosted submodules (shared themes, vendored libs),
+ * at the commits the repo pins, placed under their submodule paths. Each entry
+ * carries `src` so its contents are downloaded from the submodule's repo.
+ */
+async function submoduleBlobs({ owner, repo, branch, token, gitmodules, submodules, onProgress }) {
+  const text = await fetchFileContents({ owner, repo, branch, token, entry: gitmodules }).catch(() => '');
+  const urls = {};
+  for (const section of String(text).split(/\[submodule /).slice(1)) {
+    const path = section.match(/^\s*path\s*=\s*(.+?)\s*$/m)?.[1];
+    const url = section.match(/^\s*url\s*=\s*(.+?)\s*$/m)?.[1];
+    if (path && url) urls[path] = url;
+  }
+  const out = [];
+  for (const sub of submodules.slice(0, 5)) {
+    const url = urls[sub.path] || '';
+    // github.com/owner/repo(.git), git@github.com:owner/repo, or ../repo relative to this one
+    const m = url.match(/github\.com[/:]([^/]+)\/([^/]+?)(?:\.git)?\/?$/)
+      || (url.startsWith('../') && [null, owner, url.replace(/^\.\.\//, '').replace(/\.git$/, '')]);
+    if (!m) continue;
+    const [, subOwner, subRepo] = m;
+    try {
+      const data = await ghFetch(`/repos/${subOwner}/${subRepo}/git/trees/${sub.sha}?recursive=1`, token);
+      for (const b of data.tree.filter((e) => e.type === 'blob')) {
+        out.push({ ...b, path: `${sub.path}/${b.path}`, src: { owner: subOwner, repo: subRepo, ref: sub.sha, path: b.path } });
+      }
+      onProgress?.(`Included submodule ${sub.path} (${subOwner}/${subRepo}).`);
+    } catch {
+      onProgress?.(`Couldn't fetch submodule ${sub.path} — continuing without it.`);
+    }
+  }
+  return out;
 }
 
 /**
@@ -216,8 +255,10 @@ function isLfsPointer(bytes) {
 }
 
 async function fetchFileContents({ owner, repo, branch, token, entry }) {
+  // Submodule files come from their own repo, at the pinned commit.
+  if (entry.src) ({ owner, repo, ref: branch } = entry.src);
   const binary = BINARY_EXT.test(entry.path);
-  const filePath = entry.path.split('/').map(encodeURIComponent).join('/');
+  const filePath = (entry.src?.path || entry.path).split('/').map(encodeURIComponent).join('/');
   const rawUrl = `https://raw.githubusercontent.com/${owner}/${repo}/${branch}/${filePath}`;
   const auth = token ? { headers: { Authorization: `Bearer ${token}` } } : undefined;
   try {

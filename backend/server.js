@@ -212,6 +212,13 @@ app.post('/api/analyze', async (req, res) => {
 
     await git.clone(cloneUrl, repoDir, ['--depth', '1', ...(cloneBranch ? ['--branch', cloneBranch] : [])]);
 
+    // Submodules (shared themes, vendored libraries) are part of the app.
+    if (existsSync(join(repoDir, '.gitmodules'))) {
+      await simpleGit(repoDir).raw(['submodule', 'update', '--init', '--recursive', '--depth', '1']).catch((err) => {
+        console.warn(`[engine] submodule update failed for ${repoUrl}: ${err.message.split('\n')[0]}`);
+      });
+    }
+
     // Model weights and datasets often live in Git LFS; without git-lfs set up
     // as a clone filter, the checkout only has pointer files.
     const attrs = existsSync(join(repoDir, '.gitattributes')) ? readFileSync(join(repoDir, '.gitattributes'), 'utf8') : '';

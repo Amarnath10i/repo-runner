@@ -59,14 +59,16 @@ const RUNTIME_CONFIGS = [
       const scripts = pkg?.scripts ?? {};
       const manager = detectNodeManager(dir, pkg);
 
+      // "serve" is usually a dev server (vite, vue-cli-service serve); "preview"
+      // only serves an existing build.
       const startScript = scripts.dev
         ? 'dev'
         : scripts.start
           ? 'start'
-          : scripts.preview
-            ? 'preview'
-            : scripts.serve
-              ? 'serve'
+          : scripts.serve
+            ? 'serve'
+            : scripts.preview
+              ? 'preview'
               : null;
 
       let start;
