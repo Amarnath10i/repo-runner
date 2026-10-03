@@ -248,8 +248,7 @@ async function runFrontendAndBackend({ container, tree, services, envVars, onOut
   });
   const api = await container.spawn('npm', ['run', backend.script], { cwd: backend.dir, env: { ...SANDBOX_ENV, ...userEnv } });
   trackRun({ process: api });
-  pipeToOutput(api, (t) => onOutput(t.replace(/^(?=[^
-])/gm, '[api] ')));
+  pipeToOutput(api, (t) => onOutput(t.replace(/^(?=[^\r\n])/gm, '[api] ')));
   const apiInfo = await Promise.race([backendReady, new Promise((r) => setTimeout(() => r(null), 90000))]);
   if (apiInfo) onOutput(`\nAPI is up at ${apiInfo.url}\n`);
   else onOutput('\nThe API did not open a port — starting the site anyway.\n');
