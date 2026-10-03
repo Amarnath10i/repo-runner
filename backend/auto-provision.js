@@ -10,7 +10,7 @@ import { execSync, spawn } from 'child_process';
 import { join, dirname, relative, resolve } from 'path';
 import {
   existsSync, mkdirSync, createWriteStream, unlinkSync, readFileSync, writeFileSync,
-  readdirSync, chmodSync,
+  readdirSync, chmodSync, rmSync,
 } from 'fs';
 import https from 'https';
 import http from 'http';
@@ -39,7 +39,8 @@ const exe = (name) => (IS_WIN ? `${name}.exe` : name);
 const GO_VERSION = '1.23.4';
 const MAVEN_VERSION = '3.9.9';
 const GRADLE_VERSION = '8.10.2';
-const PHP_BRANCH = '8.3';
+// 8.4: Laravel 13 and other current frameworks use 8.4-only syntax.
+const PHP_BRANCH = '8.4';
 const RUBY_RELEASE = '3.3.12-1';
 const WINLIBS_RELEASE = '16.2.0posix-14.0.0-ucrt-r1';
 const WINLIBS_ZIP = 'winlibs-x86_64-posix-seh-gcc-16.2.0-mingw-w64ucrt-14.0.0-r1.zip';
@@ -115,6 +116,7 @@ const TOOLS = {
   php: {
     label: `PHP ${PHP_BRANCH}`,
     icon: '🐘',
+    version: PHP_BRANCH, // an install of another version is replaced
     // Windows builds move to /archives once superseded, so resolve the
     // current patch release from the official index at download time.
     urls: { 'win32-x64': resolvePhpUrl },
@@ -211,7 +213,10 @@ function readMarker(name) {
 
 export function isProvisioned(name) {
   const marker = readMarker(name);
-  return !!marker && existsSync(join(marker.binDir, TOOLS[name].bin));
+  if (!marker || !existsSync(join(marker.binDir, TOOLS[name].bin))) return false;
+  // A tool pinned to a version: an older install (another download URL) is stale.
+  const version = TOOLS[name].version;
+  return !version || (marker.url || '').includes(`-${version}.`);
 }
 
 /**
@@ -261,6 +266,8 @@ async function provision(name, onOutput) {
   }
   const url = typeof urlSpec === 'function' ? await urlSpec() : urlSpec;
   const toolDir = join(PROVISION_DIR, name);
+  // Replacing another version: start from an empty folder.
+  if (existsSync(markerPath(name))) rmSync(toolDir, { recursive: true, force: true });
   mkdirSync(toolDir, { recursive: true });
 
   onOutput?.(`\n${tool.icon} ${tool.label} not found — downloading it (one-time setup)...\n`);
