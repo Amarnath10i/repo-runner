@@ -5,10 +5,10 @@
 **Paste a GitHub URL → get a live demo.** Repo Runner detects a repo's stack,
 installs its dependencies, runs it, and shows a live preview — automatically.
 
-- **In your browser** (nothing to install): Node.js, Python, Streamlit, notebooks,
-  Hugging Face pipelines on your GPU, and static sites.
+- **In your browser** (nothing to install): Node.js, Python scripts, Flask, Django,
+  FastAPI, Streamlit, notebooks, Hugging Face pipelines on your GPU, and static sites.
 - **With the runner engine** (run it locally or [deploy it](DEPLOY.md)): everything
-  else — Java, Go, Rust, C/C++, PHP, Ruby, .NET, Python web apps, ML/AI apps and
+  else — Java, Go, Rust, C/C++, PHP, Ruby, .NET, PyTorch/TensorFlow apps, Gradio and
   full-stack monorepos. On the live site, click **Connect engine** after starting it.
 
 ## Where repos run
@@ -21,6 +21,7 @@ Many repos run **entirely in your browser**, with no server at all:
 | Static sites (HTML/CSS/JS) | Served from an in-browser web server |
 | Python scripts | Pyodide (Python in WebAssembly) — `input()` works in the terminal |
 | Jupyter notebooks | Run top to bottom in Pyodide; matplotlib figures are shown |
+| Flask / Django / FastAPI (also Starlette, Quart, Bottle) | Pyodide — the app is called directly for each request; a service worker routes the preview's requests to it. SQLite, migrations, cookies and forms work; packages with no browser build (gRPC SDKs, DB drivers) become placeholders |
 | Streamlit | stlite (Streamlit on Pyodide) |
 | Hugging Face `pipeline(...)` scripts | Transformers.js — ONNX models on your GPU (WebGPU) or CPU |
 | Anything else | A browsable file listing with the README |
@@ -30,7 +31,7 @@ language on first use — no manual setup:
 
 | Stack | Engine |
 |---|---|
-| Python — Flask / FastAPI / Django / Gradio / Streamlit, any package | uv-managed Python |
+| Python — any web framework (Gradio, Dash…), PyTorch / ML, any package | uv-managed Python |
 | Java — Maven / Gradle / Spring Boot / Quarkus / plain `.java` | Temurin JDK 11 / 17 / 21 |
 | Go · Rust · Ruby (Rails, Sinatra) · PHP (Laravel, Composer) · Bun · Deno | Portable toolchains |
 | C / C++ — CMake, Makefile or loose sources | MinGW-w64 (Windows) / system GCC |
