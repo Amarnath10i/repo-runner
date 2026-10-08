@@ -31,7 +31,10 @@ export async function clearContainerFs(container) {
 /** Remember a run's processes/listener so stopActiveRun() can clean them up. */
 export function trackRun({ process, unsubscribe }) {
   if (process) activeRun.processes.push(process);
-  if (unsubscribe) activeRun.unsubscribe = unsubscribe;
+  if (unsubscribe) {
+    const previous = activeRun.unsubscribe;
+    activeRun.unsubscribe = previous ? () => { try { previous(); } catch {} unsubscribe(); } : unsubscribe;
+  }
 }
 
 // Boot is expensive and WebContainer only allows one instance per tab, so we
@@ -58,7 +61,7 @@ export async function getContainer() {
 // package.json before running so a repo whose app is nested in a subfolder — or
 // which has no package.json at all — is handled correctly instead of crashing
 // with a confusing `npm install` ENOENT.
-export async function runRepo({ tree, envVars, analysis, onOutput, onServerReady, onPageReady, onNoServer, onExit }) {
+export async function runRepo({ tree, envVars, analysis, pyApi, onOutput, onServerReady, onPageReady, onNoServer, onExit }) {
   const container = await getContainer();
   stopActiveRun();
   await clearContainerFs(container);
@@ -145,6 +148,22 @@ export async function runRepo({ tree, envVars, analysis, onOutput, onServerReady
     );
   }
 
+  // An API running in the page (Python in Pyodide): relay it into the sandbox
+  // on the port the site expects, and point the site at it.
+  let relayPort = null;
+  let siteEnv = {};
+  if (pyApi) {
+    const relay = await startHostRelay(container, pyApi, onOutput);
+    relayPort = relay.port;
+    siteEnv = wireFrontendEnv(tree, workdir, relay.port, relay.url);
+    // Server-side use (next.config rewrites) runs inside the sandbox: give it
+    // the relay's local address — also overriding a placeholder from the
+    // repo's .env.example (https://your-backend.vercel.app). Only browser
+    // code needs the relay's sandbox URL.
+    const nextConfig = ['next.config.js', 'next.config.mjs', 'next.config.ts'].map((f) => treeText(tree, joinPath(workdir, f))).join('\n');
+    for (const key of Object.keys(siteEnv)) if (nextConfig.includes(key)) siteEnv[key] = `http://127.0.0.1:${relay.port}`;
+  }
+
   onOutput(`Starting the app (${startArgv.join(' ')})...\n`);
 
   // SSR frameworks listen first and compile the page on its first request,
@@ -159,6 +178,7 @@ export async function runRepo({ tree, envVars, analysis, onOutput, onServerReady
   const compiled = new Promise((r) => { markCompiled = r; });
   trackRun({
     unsubscribe: container.on('server-ready', (port, url) => {
+      if (port === relayPort) return; // the API relay, not the site
       if (!compilesOnRequest) {
         onServerReady(url, port);
         return;
@@ -171,7 +191,7 @@ export async function runRepo({ tree, envVars, analysis, onOutput, onServerReady
 
   // If the repo crashes immediately (e.g. Next.js/Turbopack WASM limitations),
   // surface a clearer error instead of leaving the user with a dead terminal.
-  const run = await container.spawn(startArgv[0], startArgv.slice(1), spawnOpts(workdir));
+  const run = await container.spawn(startArgv[0], startArgv.slice(1), spawnOpts(workdir, siteEnv));
   trackRun({ process: run });
   // Watchers (nodemon, tsx watch, next dev) keep running after the app crashes
   // ("app crashed - waiting for file changes"), so an exit never comes: treat
@@ -222,6 +242,111 @@ export async function runRepo({ tree, envVars, analysis, onOutput, onServerReady
     });
 
   return { container, process: run };
+}
+
+/** Text of a file in the mounted tree ('' if missing). */
+function treeText(tree, path) {
+  let node = { directory: tree };
+  for (const part of path.split('/')) node = node?.directory?.[part];
+  const data = node?.file?.contents;
+  return typeof data === 'string' ? data : data ? new TextDecoder().decode(data) : '';
+}
+
+// A small server inside the sandbox that hands each HTTP request to the page
+// (one JSON line on stdout) and answers with what the page sends back on stdin.
+// Lets a site in the sandbox call an API that runs in the page itself.
+const RELAY_MARK = '@@RRPY@@';
+const RELAY_SOURCE = String.raw`
+import http from 'node:http';
+const MARK = '@@RRPY@@';
+const pending = new Map();
+let nextId = 0;
+let buffer = '';
+// Raw mode: no echo, and no line-length limit on the terminal.
+if (process.stdin.isTTY) process.stdin.setRawMode(true);
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', (chunk) => {
+  buffer += chunk;
+  let nl;
+  while ((nl = buffer.indexOf('\n')) >= 0) {
+    const line = buffer.slice(0, nl).trim();
+    buffer = buffer.slice(nl + 1);
+    let msg;
+    try { msg = JSON.parse(line); } catch { continue; }
+    const entry = pending.get(msg.id);
+    if (!entry) continue;
+    pending.delete(msg.id);
+    const headers = {};
+    for (const [name, value] of msg.headers || []) {
+      if (/^(content-length|transfer-encoding|connection|content-encoding|set-cookie|access-control-)/i.test(name)) continue;
+      headers[name] = headers[name] ? [].concat(headers[name], value) : value;
+    }
+    entry.res.writeHead(msg.status || 500, { ...headers, ...entry.cors });
+    entry.res.end(Buffer.from(msg.body || '', 'base64'));
+  }
+});
+http.createServer((req, res) => {
+  const cors = { 'access-control-allow-origin': req.headers.origin || '*', 'access-control-allow-credentials': 'true', vary: 'Origin' };
+  if (req.method === 'OPTIONS' && req.headers['access-control-request-method']) {
+    res.writeHead(204, { ...cors, 'access-control-allow-methods': 'GET, POST, PUT, PATCH, DELETE, OPTIONS', 'access-control-allow-headers': req.headers['access-control-request-headers'] || '*', 'access-control-max-age': '600' });
+    res.end();
+    return;
+  }
+  const chunks = [];
+  req.on('data', (c) => chunks.push(c));
+  req.on('end', () => {
+    const id = ++nextId;
+    pending.set(id, { res, cors });
+    const headers = Object.entries(req.headers)
+      .filter(([k]) => !['host', 'origin', 'connection'].includes(k))
+      .map(([k, v]) => [k, Array.isArray(v) ? v.join(', ') : v]);
+    process.stdout.write(MARK + JSON.stringify({ id, method: req.method, path: req.url, headers, body: Buffer.concat(chunks).toString('base64') }) + '\n');
+  });
+}).listen(Number(process.argv[2]), () => console.log('relay ready'));
+`;
+
+function bytesToBase64(bytes) {
+  let binary = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  return btoa(binary);
+}
+
+/**
+ * Start the relay on pyApi.port; requests go to pyApi.request(req), which
+ * resolves { status, headers, body: Uint8Array }. Resolves { port, url }.
+ */
+async function startHostRelay(container, pyApi, onOutput) {
+  const { port } = pyApi;
+  await container.fs.writeFile('.rr-relay.mjs', RELAY_SOURCE);
+  let resolveUrl;
+  const ready = new Promise((r) => { resolveUrl = r; });
+  const off = container.on('server-ready', (p, url) => { if (p === port) resolveUrl(url); });
+  const proc = await container.spawn('node', ['.rr-relay.mjs', String(port)]);
+  trackRun({ process: proc, unsubscribe: off });
+  const input = proc.input.getWriter();
+  let buffer = '';
+  proc.output.pipeTo(new WritableStream({
+    write(chunk) {
+      buffer += chunk;
+      let nl;
+      while ((nl = buffer.indexOf('\n')) >= 0) {
+        const line = buffer.slice(0, nl).replace(/\r$/, '');
+        buffer = buffer.slice(nl + 1);
+        const at = line.indexOf(RELAY_MARK);
+        if (at < 0) continue;
+        let req;
+        try { req = JSON.parse(line.slice(at + RELAY_MARK.length)); } catch { continue; }
+        const body = req.body ? Uint8Array.from(atob(req.body), (c) => c.charCodeAt(0)) : null;
+        pyApi.request({ method: req.method, path: req.path, headers: req.headers, body })
+          .then((res) => input.write(`${JSON.stringify({ id: req.id, status: res.status, headers: res.headers, body: bytesToBase64(new Uint8Array(res.body || [])) })}\n`))
+          .catch(() => input.write(`${JSON.stringify({ id: req.id, status: 502, headers: [], body: '' })}\n`));
+      }
+    },
+  })).catch(() => {});
+  const url = await Promise.race([ready, new Promise((r) => setTimeout(() => r(null), 30000))]);
+  if (!url) throw new Error("The API relay didn't start in the sandbox.");
+  onOutput(`The site's API (port ${port}) is served by Python running in this tab.\n`);
+  return { port, url };
 }
 
 const FRONTEND_DEPS = ['vite', 'next', 'react-scripts', '@sveltejs/kit', 'nuxt', 'vue', '@angular/core', 'react-dom'];
@@ -441,9 +566,9 @@ export function needsLegacyOpenssl(pkg) {
 
 let legacyOpenssl = false;
 
-function spawnOpts(workdir) {
+function spawnOpts(workdir, extraEnv = {}) {
   const env = legacyOpenssl ? { ...SANDBOX_ENV, NODE_OPTIONS: '--openssl-legacy-provider' } : SANDBOX_ENV;
-  return { ...(workdir ? { cwd: workdir } : {}), env };
+  return { ...(workdir ? { cwd: workdir } : {}), env: { ...env, ...extraEnv } };
 }
 
 const joinPath = (dir, file) => (dir ? `${dir}/${file}` : file);

@@ -119,7 +119,7 @@ export function runPythonInBrowser({ tree, entry, mode, hfBridge = false, onOutp
  * `app` comes from findPyWebApp(). Resolves to { stop() }; the preview URL
  * arrives through onReady once the app has loaded.
  */
-export async function servePythonWebApp({ tree, app, onOutput, onStatus, onReady, onDone }) {
+export async function servePythonWebApp({ tree, app, env = {}, onOutput, onStatus, onReady, onDone }) {
   if (!('serviceWorker' in navigator)) {
     throw new Error("This browser can't serve web pages from Python (service workers are off, e.g. in a private window).");
   }
@@ -141,7 +141,7 @@ export async function servePythonWebApp({ tree, app, onOutput, onStatus, onReady
         onStatus?.(data.text);
         break;
       case 'web-ready':
-        onReady(`${location.origin}${prefix}/${data.landing || ''}`);
+        onReady(`${location.origin}${prefix}/${data.landing || ''}`, appId);
         break;
       case 'done':
         onDone?.(data.code);
@@ -156,13 +156,35 @@ export async function servePythonWebApp({ tree, app, onOutput, onStatus, onReady
 
   const reqFiles = ['requirements.txt', app.base && app.base !== '.' ? `${app.base}/requirements.txt` : null].filter(Boolean);
   const requirements = [...new Set(reqFiles.flatMap((f) => parseRequirementSpecs(readText(tree, f))))];
-  worker.postMessage({ type: 'serve', files: repoFiles(tree), app, requirements, appId, prefix });
+  worker.postMessage({ type: 'serve', files: repoFiles(tree), app: { ...app, env }, requirements, appId, prefix });
 
   return {
+    appId,
     stop() {
       worker.terminate();
     },
   };
+}
+
+/**
+ * Send one HTTP request to an in-browser Python app (the same channel its
+ * service worker uses). Resolves { status, headers, body: Uint8Array }.
+ */
+export function pyAppRequest(appId, { method, path, headers = [], body = null }) {
+  const channel = new BroadcastChannel('rr-pyapp');
+  const reqId = crypto.randomUUID();
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => finish({ status: 504, headers: [], body: new TextEncoder().encode('The Python app took too long to answer.') }), 180000);
+    function finish(res) {
+      clearTimeout(timer);
+      channel.close();
+      resolve(res);
+    }
+    channel.onmessage = ({ data }) => {
+      if (data?.type === 'response' && data.reqId === reqId) finish(data);
+    };
+    channel.postMessage({ type: 'request', reqId, appId, method, path, headers, body });
+  });
 }
 
 function toBase64(data) {
