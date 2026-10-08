@@ -16,6 +16,25 @@ export function parseRequirements(text, exclude = []) {
     .filter((name) => name && !exclude.includes(name.toLowerCase()));
 }
 
+/**
+ * Requirement specs that keep the project on its major versions: an exact pin
+ * 'Django==4.2.1' becomes 'Django>=4.2.1,<5'. Frameworks break APIs between
+ * majors (Starlette 1.0, Django 6), but the exact old release often predates
+ * the browser's Python (3.14) — the newest compatible release is the best bet.
+ * The worker unpins whatever has no browser build at all.
+ */
+export function parseRequirementSpecs(text) {
+  return (text || '')
+    .split(/\r?\n/)
+    .map((l) => l.replace(/#.*/, '').replace(/;.*/, '').trim())
+    .filter((l) => l && !l.startsWith('-') && !/^(git\+|https?:)/.test(l))
+    .map((l) => l.replace(/\s+/g, ''))
+    .map((l) => {
+      const m = l.match(/^([\w.\-[\],]+)===?(\d+)((?:\.\w+)*)$/);
+      return m ? `${m[1]}>=${m[2]}${m[3]},<${Number(m[2]) + 1}` : l;
+    });
+}
+
 function repoFiles(tree) {
   return listFiles(tree).map((path) => {
     let node = { directory: tree };
@@ -88,6 +107,58 @@ export function runPythonInBrowser({ tree, entry, mode, hfBridge = false, onOutp
       if (waiting) deliver(`${line}\n`);
       else queued.push(`${line}\n`);
     },
+    stop() {
+      worker.terminate();
+    },
+  };
+}
+
+/**
+ * Serve a Python web app (Flask, Django, FastAPI…) from a Pyodide worker. A
+ * service worker routes the preview's requests (/__pyapp/<id>/…) to it.
+ * `app` comes from findPyWebApp(). Resolves to { stop() }; the preview URL
+ * arrives through onReady once the app has loaded.
+ */
+export async function servePythonWebApp({ tree, app, onOutput, onStatus, onReady, onDone }) {
+  if (!('serviceWorker' in navigator)) {
+    throw new Error("This browser can't serve web pages from Python (service workers are off, e.g. in a private window).");
+  }
+  await navigator.serviceWorker.register('/rr-pyapp-sw.js', { scope: '/' });
+  await navigator.serviceWorker.ready;
+
+  const appId = Math.random().toString(36).slice(2, 10);
+  const prefix = `/__pyapp/${appId}`;
+  const worker = new Worker(new URL('./python.worker.js', import.meta.url), { type: 'module' });
+  worker.onmessage = ({ data }) => {
+    switch (data.type) {
+      case 'stdout':
+        onOutput(data.text);
+        break;
+      case 'stderr':
+        onOutput(`\x1b[31m${data.text}\x1b[0m`);
+        break;
+      case 'status':
+        onStatus?.(data.text);
+        break;
+      case 'web-ready':
+        onReady(`${location.origin}${prefix}/${data.landing || ''}`);
+        break;
+      case 'done':
+        onDone?.(data.code);
+        break;
+      default:
+    }
+  };
+  worker.onerror = (e) => {
+    onOutput(`\x1b[31m${e.message || 'Python worker failed to start'}\x1b[0m\n`);
+    onDone?.(1);
+  };
+
+  const reqFiles = ['requirements.txt', app.base && app.base !== '.' ? `${app.base}/requirements.txt` : null].filter(Boolean);
+  const requirements = [...new Set(reqFiles.flatMap((f) => parseRequirementSpecs(readText(tree, f))))];
+  worker.postMessage({ type: 'serve', files: repoFiles(tree), app, requirements, appId, prefix });
+
+  return {
     stop() {
       worker.terminate();
     },
