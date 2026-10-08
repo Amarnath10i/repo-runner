@@ -45,9 +45,59 @@ export function readText(tree, path) {
   return typeof contents === 'string' ? contents : new TextDecoder().decode(contents);
 }
 
-// Python packages that serve HTTP themselves — a browser tab can't open a
-// listening socket, so these need the backend.
-const PY_WEB_SERVERS = /^(gradio|flask|django|fastapi|uvicorn|aiohttp|tornado|bottle|sanic|dash|panel|quart|starlette|litestar|falcon|cherrypy|pyramid|web\.py|nicegui|reflex|chainlit|shiny)\b/im;
+// Python packages that serve HTTP.
+const PY_WEB_SERVERS = /^(gradio|flask|django|fastapi|uvicorn|aiohttp|tornado|bottle|sanic|dash|panel|quart|starlette|litestar|falcon|cherrypy|pyramid|web\.py|nicegui|reflex|chainlit|shiny)\b/gim;
+// WSGI/ASGI frameworks the browser can host: the app is called directly for
+// each request (no socket), with a service worker routing the preview to it.
+const PY_WEB_IN_BROWSER = { flask: 'Flask', django: 'Django', fastapi: 'FastAPI', starlette: 'Starlette', quart: 'Quart', bottle: 'Bottle', falcon: 'Falcon' };
+// ASGI servers — not needed in the browser, they just come along with an app.
+const PY_ASGI_SERVERS = new Set(['uvicorn']);
+
+/**
+ * Once every file is downloaded: where a Python web app lives.
+ * Django → { django: '<settings module>', base }; others → { candidates, base }
+ * with the files most likely to create the app first. null if none found.
+ */
+export function findPyWebApp(tree, framework) {
+  const files = listFiles(tree);
+  const byDepth = (a, b) => a.split('/').length - b.split('/').length;
+  if (framework === 'django') {
+    const manage = files.filter((f) => /(^|\/)manage\.py$/.test(f)).sort(byDepth)[0];
+    const settings = manage && (readText(tree, manage) || '').match(/DJANGO_SETTINGS_MODULE['"]\s*,\s*['"]([\w.]+)['"]/)?.[1];
+    if (!settings) return null;
+    return { django: settings, base: manage.includes('/') ? manage.slice(0, manage.lastIndexOf('/')) : '.' };
+  }
+  const py = files.filter((f) => f.endsWith('.py')
+    && !/(^|\/)(tests?|migrations|alembic|docs|examples?|benchmarks)\//.test(f)
+    && !/(^|\/)(test_[^/]*|[^/]*_test|conftest|setup)\.py$/.test(f));
+  const asFile = (mod) => {
+    const p = mod.replace(/[:(].*$/, '').replace(/\.py$/, '').replace(/\./g, '/');
+    return py.includes(`${p}.py`) ? `${p}.py` : py.includes(`${p}/__init__.py`) ? `${p}/__init__.py` : null;
+  };
+  const out = [];
+  // Where the project says its app is: FLASK_APP, then the Procfile's web command.
+  for (const f of ['.flaskenv', '.env', '.env.example']) {
+    const m = (readText(tree, f) || '').match(/^\s*FLASK_APP\s*=\s*['"]?([\w./:()-]+)/m);
+    if (m && asFile(m[1])) out.push(asFile(m[1]));
+  }
+  const web = (readText(tree, 'Procfile') || '').match(/^web:.*?\b(?:gunicorn|uvicorn|hypercorn|waitress-serve)\b.*?\s([\w.]+):\w+/m);
+  if (web && asFile(web[1])) out.push(asFile(web[1]));
+  // Then files that create one, entry-like names and shallow files first.
+  const creates = /\b(Flask|FastAPI|Starlette|Quart|Bottle)\s*\(|falcon\.(asgi\.)?App\s*\(|def\s+create_app\s*\(/;
+  const score = (f) => {
+    const text = readText(tree, f) || '';
+    return -f.split('/').length
+      + (/^(main|app|server|api|wsgi|asgi|application|__init__)\.py$/.test(f.split('/').pop()) ? 2 : 0)
+      + (/^\w+\s*=\s*(Flask|FastAPI|Starlette|Quart|Bottle)\s*\(|^\w+\s*=\s*create_app\s*\(/m.test(text) ? 2 : 0);
+  };
+  out.push(...py.filter((f) => creates.test(readText(tree, f) || '')).sort((a, b) => score(b) - score(a)));
+  const candidates = [...new Set(out)].slice(0, 6);
+  if (!candidates.length) return null;
+  // The folder it's imported from (above its packages) — its requirements live there.
+  const parts = candidates[0].split('/').slice(0, -1);
+  while (parts.length && files.includes(`${parts.join('/')}/__init__.py`)) parts.pop();
+  return { candidates, base: parts.join('/') || '.' };
+}
 // Deep-learning stacks have no WebAssembly builds for Pyodide.
 const PY_HEAVY_ML = /^(torch|tensorflow|tensorflow-cpu|keras|jax|transformers|diffusers|sentence-transformers|ultralytics|accelerate|onnxruntime|llama-cpp-python|vllm|langchain|llama-index|openai-whisper|spacy)\b/im;
 const PY_HEAVY_ML_IMPORT = /^\s*(?:import|from)\s+(torch|tensorflow|keras|jax|transformers|diffusers|sentence_transformers|ultralytics|whisper|langchain|llama_index|spacy)\b/m;
@@ -64,7 +114,8 @@ export function notebookWithCode(tree, planned) {
   if (codeCells(readText(tree, planned)).trim()) return planned;
   const notebooks = listFiles(tree)
     .filter((f) => f.endsWith('.ipynb') && !f.includes('.ipynb_checkpoints'))
-    .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+    // Plain character order: 'notebooks/' before 'notebooks_v1/' (an old copy).
+    .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
   return notebooks.find((f) => codeCells(readText(tree, f)).trim()) || planned;
 }
 
@@ -97,8 +148,10 @@ function pickPythonEntry(tree, files, preferred) {
 export function planBrowserRun(tree, stack) {
   const files = listFiles(tree);
   const has = (name) => files.includes(name);
-  const manifests = ['requirements.txt', 'pyproject.toml', 'Pipfile', 'setup.py']
-    .map((f) => (readText(tree, f) || '').toLowerCase())
+  // Every Python manifest (backend/requirements.txt too), one dependency per
+  // line with pyproject's indentation and quotes stripped.
+  const manifests = files.filter((f) => /(^|\/)(requirements\.txt|pyproject\.toml|Pipfile|setup\.py)$/.test(f))
+    .map((f) => (readText(tree, f) || '').toLowerCase().replace(/^[\s"']+/gm, ''))
     .join('\n');
 
   if (stack === 'python' || (stack === 'unknown' && files.some((f) => f.endsWith('.py') || f.endsWith('.ipynb')))) {
@@ -125,9 +178,22 @@ export function planBrowserRun(tree, stack) {
       const entry = pickPythonEntry(tree, files, ['streamlit_app.py', 'Home.py', 'app.py', 'main.py']);
       return { kind: 'stlite', label: 'Streamlit (in-browser)', entry, reason: 'Streamlit runs in your browser via stlite (Pyodide).' };
     }
-    const server = manifests.match(PY_WEB_SERVERS) || (has('manage.py') ? ['django'] : null);
-    if (server) {
-      return { kind: null, reason: `This is a ${server[0].trim()} web app — it needs to open a network port, which a browser tab can't do.` };
+    const servers = [...manifests.matchAll(PY_WEB_SERVERS)].map((m) => m[1].toLowerCase());
+    if (files.some((f) => /(^|\/)manage\.py$/.test(f))) servers.push('django');
+    if (servers.length) {
+      // Frameworks that run their own server (Gradio, Dash, aiohttp…) need the engine.
+      const ownServer = servers.find((s) => !PY_WEB_IN_BROWSER[s] && !PY_ASGI_SERVERS.has(s));
+      const framework = servers.find((s) => PY_WEB_IN_BROWSER[s]);
+      if (framework && !ownServer) {
+        const name = PY_WEB_IN_BROWSER[framework];
+        return {
+          kind: 'python-web',
+          framework,
+          label: `${name} (in-browser)`,
+          reason: `${name} runs in your browser via Pyodide — this tab serves the app's pages itself.`,
+        };
+      }
+      return { kind: null, reason: `This is a ${ownServer || servers[0]} web app — it runs its own web server, which needs the runner engine.` };
     }
     const entry = pickPythonEntry(tree, files, []);
     const gui = rootCode.match(PY_DESKTOP_GUI);

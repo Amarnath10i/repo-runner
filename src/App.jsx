@@ -5,8 +5,8 @@ import '@xterm/xterm/css/xterm.css';
 import { parseGithubUrl, fetchRepoTree, hydrateAllFiles, detectEnvVars, GitHubNetworkError, RateLimitError } from './lib/github.js';
 import { runRepo, stopActiveRun } from './lib/runner.js';
 import { runStaticSite } from './lib/static-runner.js';
-import { runPythonInBrowser, buildStlitePage } from './lib/python-runner.js';
-import { planBrowserRun, notebookWithCode } from './lib/browser-plan.js';
+import { runPythonInBrowser, buildStlitePage, servePythonWebApp } from './lib/python-runner.js';
+import { planBrowserRun, notebookWithCode, findPyWebApp } from './lib/browser-plan.js';
 import { analyzeRepo, checkOllamaAvailable } from './lib/ollama.js';
 import { analyzeTreeLocally, detectStack, isPromptableSecret, treeWebContainerBlocker } from './lib/heuristics.js';
 import {
@@ -45,8 +45,8 @@ const STEPS = [
 // step runs so long installs still show movement.
 const STEP_PROGRESS = { fetch: [4, 18], detect: [18, 30], install: [30, 78], start: [78, 94], live: [100, 100] };
 
-const IN_BROWSER_STACKS = ['Node.js', 'Python', 'Streamlit', 'Notebooks', 'HF pipelines (WebGPU)', 'Static sites'];
-const ENGINE_STACKS = ['Java', 'Go', 'Rust', 'C / C++', 'PHP', 'Ruby', '.NET', 'Django', 'Flask', 'FastAPI', 'Gradio'];
+const IN_BROWSER_STACKS = ['Node.js', 'Python', 'Flask', 'Django', 'FastAPI', 'Streamlit', 'Notebooks', 'HF pipelines (WebGPU)', 'Static sites'];
+const ENGINE_STACKS = ['Java', 'Go', 'Rust', 'C / C++', 'PHP', 'Ruby', '.NET', 'PyTorch / ML', 'Gradio'];
 
 const EXAMPLES = [
   { label: 'Express app', url: 'https://github.com/heroku/node-js-getting-started' },
@@ -501,6 +501,34 @@ export default function App() {
       setPhase('start');
       setPreviewUrl(url);
       setStage(STAGES.READY);
+      return;
+    }
+
+    if (plan.kind === 'python-web') {
+      const app = findPyWebApp(tree, plan.framework);
+      if (!app) {
+        fail(`Couldn't find where this ${plan.label.replace(' (in-browser)', '')} app is created — it needs the runner engine.`, 'needs-engine');
+        return;
+      }
+      let served = false;
+      try {
+        pythonRef.current = await servePythonWebApp({
+          tree,
+          app,
+          onOutput: writeLog,
+          onReady: (url) => {
+            served = true;
+            setPreviewUrl(url);
+            setStage(STAGES.READY);
+            writeLog(`\n\x1b[1;32m✓ App is live — served by Python running in this tab\x1b[0m\n`);
+          },
+          onDone: () => {
+            if (!served) fail('The Python app stopped before it could serve pages — the terminal shows why.', 'needs-engine');
+          },
+        });
+      } catch (err) {
+        fail(err.message, 'needs-engine');
+      }
       return;
     }
 
@@ -1165,9 +1193,9 @@ function ErrorPanel({ message, kind, onRetry, onConnect, onBack }) {
         <p className="error-message">{message}</p>
         <div className="engine-help">
           <p>
-            In your browser, GitLive runs <strong>Node.js, Python scripts, Streamlit, notebooks</strong> and{' '}
-            <strong>static sites</strong>. Everything else — Java, Go, Rust, C/C++, PHP, Ruby, .NET, and Python
-            web servers (Flask, Django, FastAPI, Gradio) — runs on the engine, which installs each language automatically.
+            In your browser, GitLive runs <strong>Node.js, Python (scripts, notebooks, Streamlit, Flask, Django,
+            FastAPI)</strong> and <strong>static sites</strong>. Everything else — Java, Go, Rust, C/C++, PHP, Ruby,
+            .NET, PyTorch/TensorFlow and Gradio — runs on the engine, which installs each language automatically.
           </p>
           <p className="engine-cmd-label">Start the engine on your computer (or use a deployed one), then connect:</p>
           <code className="engine-cmd">git clone https://github.com/Amarnath10i/repo-runner && cd repo-runner/backend && npm install && npm start</code>
