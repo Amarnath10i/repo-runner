@@ -5,7 +5,7 @@ import '@xterm/xterm/css/xterm.css';
 import { parseGithubUrl, fetchRepoTree, hydrateAllFiles, detectEnvVars, GitHubNetworkError, RateLimitError } from './lib/github.js';
 import { runRepo, stopActiveRun } from './lib/runner.js';
 import { runStaticSite } from './lib/static-runner.js';
-import { runPythonInBrowser, buildStlitePage, servePythonWebApp } from './lib/python-runner.js';
+import { runPythonInBrowser, buildStlitePage, servePythonWebApp, pyAppRequest } from './lib/python-runner.js';
 import { planBrowserRun, notebookWithCode, findPyWebApp } from './lib/browser-plan.js';
 import { analyzeRepo, checkOllamaAvailable } from './lib/ollama.js';
 import { analyzeTreeLocally, detectStack, isPromptableSecret, treeWebContainerBlocker } from './lib/heuristics.js';
@@ -477,7 +477,9 @@ export default function App() {
 
     const tree = treeRef.current;
     writeLog(`\n\x1b[1;36m▸ Downloading project files…\x1b[0m\n`);
-    await hydrateAllFiles({ ...repoMetaRef.current, tree, blobs: blobsRef.current, onProgress: (m) => writeLog(`  ${m}\n`) });
+    // Python can load bigger data files (search indexes, datasets) than the Node sandbox.
+    const maxBytes = plan.kind?.startsWith('python') ? 100 * 1024 * 1024 : undefined;
+    await hydrateAllFiles({ ...repoMetaRef.current, tree, blobs: blobsRef.current, maxBytes, onProgress: (m) => writeLog(`  ${m}\n`) });
 
     if (plan.kind === 'static') {
       setExecutionMode('webcontainer');
@@ -507,28 +509,10 @@ export default function App() {
     if (plan.kind === 'python-web') {
       const app = findPyWebApp(tree, plan.framework);
       if (!app) {
-        fail(`Couldn't find where this ${plan.label.replace(' (in-browser)', '')} app is created — it needs the runner engine.`, 'needs-engine');
+        fail(`Couldn't find where this ${plan.framework} app is created — it needs the runner engine.`, 'needs-engine');
         return;
       }
-      let served = false;
-      try {
-        pythonRef.current = await servePythonWebApp({
-          tree,
-          app,
-          onOutput: writeLog,
-          onReady: (url) => {
-            served = true;
-            setPreviewUrl(url);
-            setStage(STAGES.READY);
-            writeLog(`\n\x1b[1;32m✓ App is live — served by Python running in this tab\x1b[0m\n`);
-          },
-          onDone: () => {
-            if (!served) fail('The Python app stopped before it could serve pages — the terminal shows why.', 'needs-engine');
-          },
-        });
-      } catch (err) {
-        fail(err.message, 'needs-engine');
-      }
+      await askEnvOrRun(detectEnvVars(tree), analysisRef.current, (env) => startPythonWebApp(plan, app, env));
       return;
     }
 
@@ -560,9 +544,40 @@ export default function App() {
     setInputTarget((line) => ctl.sendInput(line));
   }
 
+  /** A Python web app in Pyodide — and, with a JS site beside it, that site in the Node sandbox. */
+  async function startPythonWebApp(plan, app, env) {
+    setStage(STAGES.RUNNING);
+    const tree = treeRef.current;
+    let served = false;
+    try {
+      pythonRef.current = await servePythonWebApp({
+        tree,
+        app,
+        env,
+        onOutput: writeLog,
+        onReady: (url, appId) => {
+          served = true;
+          if (plan.frontend) {
+            writeLog(`\n\x1b[1;32m✓ The API is running in this tab\x1b[0m — starting the site in ./${plan.frontend.dir}…\n`);
+            startWebContainerRun(tree, env, { port: plan.frontend.apiPort, request: (req) => pyAppRequest(appId, req) });
+            return;
+          }
+          setPreviewUrl(url);
+          setStage(STAGES.READY);
+          writeLog(`\n\x1b[1;32m✓ App is live — served by Python running in this tab\x1b[0m\n`);
+        },
+        onDone: () => {
+          if (!served) fail('The Python app stopped before it could serve pages — the terminal shows why.', 'needs-engine');
+        },
+      });
+    } catch (err) {
+      fail(err.message, 'needs-engine');
+    }
+  }
+
   // ─── WebContainer execution (Node.js) ───
 
-  async function startWebContainerRun(tree, envVars) {
+  async function startWebContainerRun(tree, envVars, pyApi = null) {
     setStage(STAGES.RUNNING);
     let becameReady = false;
     try {
@@ -579,6 +594,7 @@ export default function App() {
       const { process: proc } = await runRepo({
         tree,
         envVars,
+        pyApi,
         analysis: analysisRef.current,
         onOutput: writeLog,
         onServerReady: (url, port, info) => {

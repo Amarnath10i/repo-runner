@@ -139,6 +139,40 @@ function pickPythonEntry(tree, files, preferred) {
   return rootPy.find((f) => /__name__\s*==\s*['"]__main__['"]/.test(readText(tree, f) || '')) || rootPy[0] || null;
 }
 
+const FRONTEND_DEPS = ['vite', 'next', 'react-scripts', '@sveltejs/kit', 'nuxt', 'vue', '@angular/core', 'react-dom'];
+const FRONTEND_DEV_PORTS = new Set([3000, 3001, 4173, 4200, 5173, 5174]);
+
+/**
+ * A JavaScript site in a top-level folder (frontend/, client/, web/…) and the
+ * port it expects its API on — from its config and code ("localhost:8000"),
+ * else the framework's usual port. null if there's none.
+ */
+function findJsFrontend(tree, framework) {
+  for (const [dir, node] of Object.entries(tree)) {
+    if (!node.directory || dir.startsWith('.') || dir === 'node_modules') continue;
+    let pkg;
+    try {
+      pkg = JSON.parse(readText(tree, `${dir}/package.json`) || 'null');
+    } catch {
+      continue;
+    }
+    const deps = { ...(pkg?.dependencies || {}), ...(pkg?.devDependencies || {}) };
+    const scripts = pkg?.scripts || {};
+    if (!FRONTEND_DEPS.some((d) => deps[d]) || !(scripts.dev || scripts.start || scripts.serve)) continue;
+    const ports = {};
+    for (const f of listFiles(node.directory)) {
+      if (!/(\.env[\w.]*|\.[cm]?[jt]sx?|\.vue|\.svelte)$/.test(f)) continue;
+      for (const m of (readText(node.directory, f) || '').matchAll(/(?:localhost|127\.0\.0\.1):(\d{4,5})/g)) {
+        const port = Number(m[1]);
+        if (!FRONTEND_DEV_PORTS.has(port)) ports[port] = (ports[port] || 0) + 1;
+      }
+    }
+    const seen = Object.entries(ports).sort((a, b) => b[1] - a[1])[0];
+    return { dir, apiPort: seen ? Number(seen[0]) : framework === 'flask' ? 5000 : 8000 };
+  }
+  return null;
+}
+
 /**
  * Plan an in-browser run. Returns { kind, label, entry?, reason } where kind is
  * 'static' | 'python-script' | 'python-notebook' | 'stlite',
@@ -170,7 +204,15 @@ export function planBrowserRun(tree, stack) {
       };
     }
     const notebookCode = files.filter((f) => !f.includes('/') && f.endsWith('.ipynb')).map((f) => codeCells(readText(tree, f))).join('\n');
-    const heavy = (manifests.match(PY_HEAVY_ML) || rootCode.match(PY_HEAVY_ML_IMPORT) || notebookCode.match(PY_HEAVY_ML_IMPORT))?.[1];
+    const servers = [...manifests.matchAll(PY_WEB_SERVERS)].map((m) => m[1].toLowerCase());
+    if (files.some((f) => /(^|\/)manage\.py$/.test(f))) servers.push('django');
+    // Frameworks that run their own server (Gradio, Dash, aiohttp…) need the engine.
+    const ownServer = servers.find((s) => !PY_WEB_IN_BROWSER[s] && !PY_ASGI_SERVERS.has(s));
+    const framework = !ownServer && servers.find((s) => PY_WEB_IN_BROWSER[s]);
+    // For a web app, what it needs is in its manifests; helper scripts beside
+    // it (a dataset builder importing sentence_transformers) don't count.
+    const heavy = (manifests.match(PY_HEAVY_ML)
+      || (!framework && (rootCode.match(PY_HEAVY_ML_IMPORT) || notebookCode.match(PY_HEAVY_ML_IMPORT))))?.[1];
     if (heavy) {
       return { kind: null, reason: `This project uses ${heavy}, which can't run in a browser tab — it needs the runner engine (CPU builds are installed automatically).` };
     }
@@ -178,19 +220,20 @@ export function planBrowserRun(tree, stack) {
       const entry = pickPythonEntry(tree, files, ['streamlit_app.py', 'Home.py', 'app.py', 'main.py']);
       return { kind: 'stlite', label: 'Streamlit (in-browser)', entry, reason: 'Streamlit runs in your browser via stlite (Pyodide).' };
     }
-    const servers = [...manifests.matchAll(PY_WEB_SERVERS)].map((m) => m[1].toLowerCase());
-    if (files.some((f) => /(^|\/)manage\.py$/.test(f))) servers.push('django');
     if (servers.length) {
-      // Frameworks that run their own server (Gradio, Dash, aiohttp…) need the engine.
-      const ownServer = servers.find((s) => !PY_WEB_IN_BROWSER[s] && !PY_ASGI_SERVERS.has(s));
-      const framework = servers.find((s) => PY_WEB_IN_BROWSER[s]);
-      if (framework && !ownServer) {
+      if (framework) {
         const name = PY_WEB_IN_BROWSER[framework];
+        // A JavaScript site beside the API (frontend/ + backend/): the site
+        // runs in the Node sandbox and calls the API running in Pyodide.
+        const frontend = findJsFrontend(tree, framework);
         return {
           kind: 'python-web',
           framework,
-          label: `${name} (in-browser)`,
-          reason: `${name} runs in your browser via Pyodide — this tab serves the app's pages itself.`,
+          frontend,
+          label: frontend ? `${name} API + site (in-browser)` : `${name} (in-browser)`,
+          reason: frontend
+            ? `The ${name} API runs in your browser via Pyodide, and the site in ./${frontend.dir} in the in-browser Node sandbox.`
+            : `${name} runs in your browser via Pyodide — this tab serves the app's pages itself.`,
         };
       }
       return { kind: null, reason: `This is a ${ownServer || servers[0]} web app — it runs its own web server, which needs the runner engine.` };
