@@ -202,17 +202,17 @@ async function submoduleBlobs({ owner, repo, branch, token, gitmodules, submodul
  * Phase 2 (in-browser runs only): download the contents of every remaining
  * blob so the tree can be mounted into the in-browser sandbox.
  */
-export async function hydrateAllFiles({ owner, repo, branch = 'HEAD', token, tree, blobs, onProgress }) {
+export async function hydrateAllFiles({ owner, repo, branch = 'HEAD', token, tree, blobs, onProgress, maxBytes = MAX_FILE_BYTES }) {
   const pending = blobs.filter((entry) => {
     const node = getNode(tree, entry.path.split('/'));
     return !node?.file || node.file.contents === null;
   });
-  const skipped = pending.filter((e) => e.size > MAX_FILE_BYTES);
+  const skipped = pending.filter((e) => e.size > maxBytes);
   for (const e of skipped) {
     insertIntoTree(tree, e.path.split('/'), '');
     onProgress?.(`Skipped ${e.path} (${(e.size / 1048576).toFixed(0)} MB — too large for the browser sandbox)`);
   }
-  const entries = pending.filter((e) => !(e.size > MAX_FILE_BYTES));
+  const entries = pending.filter((e) => !(e.size > maxBytes));
   await downloadBlobs({ owner, repo, branch, token, tree, entries, onProgress, label: 'files' });
   return tree;
 }
@@ -269,7 +269,7 @@ async function fetchFileContents({ owner, repo, branch, token, entry }) {
         const media = await fetch(`https://media.githubusercontent.com/media/${owner}/${repo}/${branch}/${filePath}`, auth).catch(() => null);
         if (media?.ok) bytes = new Uint8Array(await media.arrayBuffer());
       }
-      return binary ? bytes : new TextDecoder('utf-8', { fatal: false }).decode(bytes);
+      return binary ? bytes : asText(bytes);
     }
   } catch {
     // fall through to the API
@@ -281,7 +281,7 @@ async function fetchFileContents({ owner, repo, branch, token, entry }) {
 function decodeBlob(blob, binary) {
   if (blob.encoding !== 'base64') return blob.content;
   const bytes = Uint8Array.from(atob(blob.content.replace(/\n/g, '')), (c) => c.charCodeAt(0));
-  return binary ? bytes : new TextDecoder('utf-8', { fatal: false }).decode(bytes);
+  return binary ? bytes : asText(bytes);
 }
 
 function insertIntoTree(root, pathParts, contents) {
@@ -336,4 +336,13 @@ function parseEnvKeys(contents) {
       return !value || /^(your|<|xxx|changeme|replace|todo|\*+$)/i.test(value);
     })
     .map((line) => line.split('=')[0].replace(/^export\s+/, '').trim());
+}
+
+/** Text if it's valid UTF-8, else the bytes untouched (a binary file with an unknown extension). */
+function asText(bytes) {
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+  } catch {
+    return bytes;
+  }
 }

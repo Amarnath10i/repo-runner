@@ -219,10 +219,12 @@ def rr_patch_matplotlib():
     except ImportError:
         pass
 
-def rr_missing_imports(chunks):
+def rr_missing_imports(chunks, startup_only=False):
     """Top-level modules the code imports that aren't importable yet.
     Each chunk (file or notebook cell) is parsed on its own, so one bit of
-    unparsable code doesn't hide the imports in the rest."""
+    unparsable code doesn't hide the imports in the rest. startup_only: just
+    the imports at the top of a module — the ones inside functions or
+    try/except ImportError are optional extras."""
     import ast, importlib.util
     names = set()
     for code in chunks:
@@ -230,12 +232,18 @@ def rr_missing_imports(chunks):
             tree = ast.parse(code)
         except SyntaxError:
             continue
-        for node in ast.walk(tree):
+        for node in (tree.body if startup_only else ast.walk(tree)):
             if isinstance(node, ast.Import):
                 names.update(a.name.split('.')[0] for a in node.names)
             elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
                 names.add(node.module.split('.')[0])
-    local = {os.path.splitext(f)[0] for f in os.listdir('.')}
+    # The repo's own modules anywhere in it (backend/main.py, app/…), so a
+    # same-named PyPI package is never installed in their place.
+    local = set()
+    for folder, dirs, files in os.walk('.'):
+        dirs[:] = [d for d in dirs if not d.startswith('.') and d not in ('node_modules', '__pycache__')]
+        local.update(os.path.splitext(f)[0] for f in files if f.endswith('.py'))
+        local.update(dirs)
     return sorted(n for n in names if n not in local and n not in sys.builtin_module_names
                   and importlib.util.find_spec(n) is None)
 
@@ -656,7 +664,98 @@ def rr_failed_import(exc):
             return (m.group(1) or m.group(2)) if m else None
     return None
 
+def rr_faiss_shim():
+    """FAISS has no browser build. Flat indexes (the common case in demos) are
+    just stored vectors searched by dot product or distance — do that in NumPy,
+    reading the same index files faiss.write_index produces."""
+    import types, struct
+    import numpy as np
+    faiss = types.ModuleType('faiss')
+    METRIC_INNER_PRODUCT, METRIC_L2 = 0, 1
+
+    class IndexFlat:
+        def __init__(self, d, metric=METRIC_L2):
+            self.d, self.metric_type = d, metric
+            self.xb = np.zeros((0, d), dtype='float32')
+            self.is_trained = True
+        @property
+        def ntotal(self):
+            return len(self.xb)
+        def add(self, x):
+            self.xb = np.vstack([self.xb, np.asarray(x, dtype='float32').reshape(-1, self.d)])
+        def reset(self):
+            self.xb = np.zeros((0, self.d), dtype='float32')
+        def reconstruct(self, i):
+            return self.xb[i].copy()
+        def search(self, x, k):
+            q = np.asarray(x, dtype='float32').reshape(-1, self.d)
+            if self.metric_type == METRIC_INNER_PRODUCT:
+                scores = q @ self.xb.T
+                order = np.argsort(-scores, axis=1)[:, :k]
+            else:
+                scores = (q * q).sum(1)[:, None] - 2 * q @ self.xb.T + (self.xb * self.xb).sum(1)[None, :]
+                order = np.argsort(scores, axis=1)[:, :k]
+            D = np.take_along_axis(scores, order, axis=1).astype('float32')
+            I = order.astype('int64')
+            if k > self.ntotal:  # faiss pads with -1
+                pad = k - self.ntotal
+                D = np.hstack([D, np.full((len(q), pad), np.inf if self.metric_type else -np.inf, 'float32')])
+                I = np.hstack([I, np.full((len(q), pad), -1, 'int64')])
+            return D, I
+
+    class IndexFlatIP(IndexFlat):
+        def __init__(self, d):
+            super().__init__(d, METRIC_INNER_PRODUCT)
+
+    class IndexFlatL2(IndexFlat):
+        def __init__(self, d):
+            super().__init__(d, METRIC_L2)
+
+    def read_index(path, *args):
+        with open(path, 'rb') as f:
+            data = f.read()
+        kind = data[:4]
+        if kind not in (b'IxFI', b'IxF2'):
+            raise RuntimeError(f"This {kind.decode(errors='replace')} FAISS index needs real FAISS (the runner engine) — the browser version only reads flat indexes.")
+        d, ntotal = struct.unpack_from('<iq', data, 4)
+        offset = 4 + 4 + 8 + 16 + 1  # fourcc, d, ntotal, two reserved int64s, is_trained
+        metric = struct.unpack_from('<i', data, offset)[0]
+        offset += 4 + (4 if metric > 1 else 0)
+        count = struct.unpack_from('<Q', data, offset)[0]
+        xb = np.frombuffer(data, dtype='<f4', count=count, offset=offset + 8).reshape(ntotal, d)
+        index = IndexFlatIP(d) if kind == b'IxFI' else IndexFlatL2(d)
+        index.xb = xb.copy()
+        return index
+
+    def write_index(index, path):
+        kind = b'IxFI' if index.metric_type == METRIC_INNER_PRODUCT else b'IxF2'
+        header = kind + struct.pack('<iqqqbi', index.d, index.ntotal, 1 << 20, 1 << 20, 1, index.metric_type)
+        with open(path, 'wb') as f:
+            f.write(header + struct.pack('<Q', index.xb.size) + index.xb.astype('<f4').tobytes())
+
+    def normalize_L2(x):
+        norms = np.linalg.norm(x, axis=1, keepdims=True)
+        x /= np.maximum(norms, 1e-12)
+
+    for name, value in dict(IndexFlat=IndexFlat, IndexFlatIP=IndexFlatIP, IndexFlatL2=IndexFlatL2,
+                            read_index=read_index, write_index=write_index, normalize_L2=normalize_L2,
+                            METRIC_INNER_PRODUCT=METRIC_INNER_PRODUCT, METRIC_L2=METRIC_L2).items():
+        setattr(faiss, name, value)
+    faiss.__version__ = 'numpy-shim'
+    return faiss
+
+# Pure-Python stand-ins for compiled packages with no browser build.
+RR_SHIMS = {'faiss': rr_faiss_shim}
+
 def rr_stub_module(name, replace=False):
+    top = name.split('.')[0]
+    if top in RR_SHIMS and top not in sys.modules:
+        sys.modules[top] = RR_SHIMS[top]()
+        print(f"\x1b[33m[setup] {top} → a NumPy version that works in the browser (flat indexes).\x1b[0m")
+        return True
+    return rr_placeholder_module(name, replace)
+
+def rr_placeholder_module(name, replace=False):
     """Make 'import <name>' succeed with a placeholder, when <name> belongs to
     a package that has no browser build (an AI SDK with gRPC, a DB driver…)
     — so the app starts and only the features that use it fail."""
@@ -750,6 +849,8 @@ async def rr_lifespan(app):
 async def rr_web_load(spec):
     spec = spec.to_py() if hasattr(spec, 'to_py') else spec
     rr_web.update(prefix=spec['prefix'], host=spec['host'], scheme=spec['scheme'], state={})
+    # Values entered in GitLive (API keys…) win over the repo's .env files.
+    os.environ.update({k: v for k, v in (spec.get('env') or {}).items() if v})
     root = os.getcwd()
     rr_env_file()
     if spec.get('django'):
@@ -988,7 +1089,7 @@ async function serve({ files, app, requirements, appId, prefix }) {
       // unparsable file — its imports are retried by rr_missing_imports
     }
   }
-  const missing = g.get('rr_missing_imports')(pyodide.toPy(chunks)).toJs();
+  const missing = g.get('rr_missing_imports')(pyodide.toPy(chunks), true).toJs();
   if (missing.length) {
     const pkgs = missing.map((m) => IMPORT_TO_PIP[m] || m);
     post('stdout', { text: `  Also installing imported packages: ${pkgs.join(', ')}\n` });
